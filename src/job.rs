@@ -1,28 +1,28 @@
-pub use hash_mapper_derive::HashMapper;
+pub use flowd_derive::Job;
 
 /// Bidirectional conversion between a Rust struct and Redis-friendly
 /// `Vec<(String, redis::Value)>` pairs.
 ///
-/// Typically derived via `#[derive(HashMapper)]` rather than implemented
+/// Typically derived via `#[derive(Job)]` rather than implemented
 /// by hand. The derive macro generates all three methods plus `From`/`TryFrom`
 /// impls for seamless integration with Redis Streams (`XADD` / `XREADGROUP`).
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// #[derive(Debug, HashMapper)]
-/// struct Job {
+/// #[derive(Debug, Job)]
+/// struct Email {
 ///     url: String,
 ///     priority: u8,
 ///     #[mapper(serialize = "ser_tags", deserialize = "de_tags")]
 ///     tags: Vec<String>,
 /// }
 ///
-/// let job = Job { url: "https://example.com".into(), priority: 1, tags: vec![] };
-/// let pairs = job.try_to_pairs().unwrap();
-/// let restored = Job::try_from_pairs(&pairs).unwrap();
+/// let email = Email { url: "https://example.com".into(), priority: 1, tags: vec![] };
+/// let pairs = email.try_to_pairs().unwrap();
+/// let restored = Email::try_from_pairs(&pairs).unwrap();
 /// ```
-pub trait HashMappable: Sized {
+pub trait Job: Sized {
     /// Serialize `self` into a list of `(field_name, redis::Value)` pairs.
     ///
     /// Each value is wrapped as `redis::Value::BulkString`. `Option<T>` fields

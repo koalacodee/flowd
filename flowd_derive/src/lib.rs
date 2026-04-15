@@ -50,7 +50,7 @@ fn parse_mapper_attr(attrs: &[Attribute]) -> FieldMapper {
 /// - `TryFrom<Vec<(String, redis::Value)>> for Struct` — owned pairs.
 /// - `TryFrom<&[(String, redis::Value)]> for Struct` — borrowed pairs.
 /// - `TryFrom<Vec<(&str, &str)>> for Struct` — convenience for tests.
-/// - `HashMappable` trait impl (used by the task queue internals).
+/// - `Job` trait impl (used by the task queue internals).
 ///
 /// # Field-level attributes
 ///
@@ -71,7 +71,7 @@ fn parse_mapper_attr(attrs: &[Attribute]) -> FieldMapper {
 /// # Example
 ///
 /// ```rust,ignore
-/// use hash_mapper::prelude::*;
+/// use flowd::prelude::*;
 ///
 /// fn ser_tags(tags: &Vec<String>) -> Result<String, String> {
 ///     Ok(tags.join(","))
@@ -80,7 +80,7 @@ fn parse_mapper_attr(attrs: &[Attribute]) -> FieldMapper {
 ///     Ok(s.split(',').map(String::from).collect())
 /// }
 ///
-/// #[derive(Debug, HashMapper)]
+/// #[derive(Debug, Job)]
 /// struct Job {
 ///     url: String,
 ///     priority: u32,
@@ -90,8 +90,8 @@ fn parse_mapper_attr(attrs: &[Attribute]) -> FieldMapper {
 ///     assigned_to: Option<String>,
 /// }
 /// ```
-#[proc_macro_derive(HashMapper, attributes(mapper))]
-pub fn derive_hash_mapper(input: TokenStream) -> TokenStream {
+#[proc_macro_derive(Job, attributes(mapper))]
+pub fn derive_job(input: TokenStream) -> TokenStream {
     // Parse the annotated struct
     let input = parse_macro_input!(input as DeriveInput);
     let struct_name = &input.ident;
@@ -100,9 +100,9 @@ pub fn derive_hash_mapper(input: TokenStream) -> TokenStream {
     let fields = match &input.data {
         Data::Struct(s) => match &s.fields {
             Fields::Named(f) => &f.named,
-            _ => panic!("HashMapper only supports structs with named fields"),
+            _ => panic!("Job only supports structs with named fields"),
         },
-        _ => panic!("HashMapper only supports structs"),
+        _ => panic!("Job only supports structs"),
     };
 
     // Pre-compute field metadata used across all generated impls
@@ -128,7 +128,7 @@ pub fn derive_hash_mapper(input: TokenStream) -> TokenStream {
                 quote! {
                     pairs.push((
                         #key.to_string(),
-                        hash_mapper::redis::Value::BulkString(
+                        flowd::redis::Value::BulkString(
                             #ser_fn(&val.#name)
                                 .map_err(|e| format!("serialize error on `{}`: {}", #key, e))?
                                 .into_bytes()
@@ -141,7 +141,7 @@ pub fn derive_hash_mapper(input: TokenStream) -> TokenStream {
                     if let Some(ref inner) = val.#name {
                         pairs.push((
                             #key.to_string(),
-                            hash_mapper::redis::Value::BulkString(
+                            flowd::redis::Value::BulkString(
                                 inner.to_string().into_bytes()
                             ),
                         ));
@@ -152,7 +152,7 @@ pub fn derive_hash_mapper(input: TokenStream) -> TokenStream {
                 quote! {
                     pairs.push((
                         #key.to_string(),
-                        hash_mapper::redis::Value::BulkString(
+                        flowd::redis::Value::BulkString(
                             val.#name.to_string().into_bytes()
                         ),
                     ));
@@ -182,7 +182,7 @@ pub fn derive_hash_mapper(input: TokenStream) -> TokenStream {
                     quote! {
                         #name: match #lookup {
                             Some(v) => {
-                                let s: String = hash_mapper::redis::from_redis_value(v)
+                                let s: String = flowd::redis::from_redis_value(v)
                                     .map_err(|e| format!("deserialize error on `{}`: {}", #key, e))?;
                                 if s.is_empty() {
                                     None
@@ -200,7 +200,7 @@ pub fn derive_hash_mapper(input: TokenStream) -> TokenStream {
                         #name: {
                             let v = #lookup
                                 .ok_or_else(|| format!("missing field: `{}`", #key))?;
-                            let s: String = hash_mapper::redis::from_redis_value(v)
+                            let s: String = flowd::redis::from_redis_value(v)
                                 .map_err(|e| format!("deserialize error on `{}`: {}", #key, e))?;
                             #de_fn(&s)
                                 .map_err(|e| format!("deserialize error on `{}`: {}", #key, e))?
@@ -213,7 +213,7 @@ pub fn derive_hash_mapper(input: TokenStream) -> TokenStream {
                 quote! {
                     #name: match #lookup {
                         Some(v) => Some(
-                            hash_mapper::redis::from_redis_value::<#inner>(v)
+                            flowd::redis::from_redis_value::<#inner>(v)
                                 .map_err(|e| format!("parse error on `{}`: {}", #key, e))?
                         ),
                         None => None,
@@ -222,7 +222,7 @@ pub fn derive_hash_mapper(input: TokenStream) -> TokenStream {
             } else {
                 // Default — requires field type to implement FromRedisValue
                 quote! {
-                    #name: hash_mapper::redis::from_redis_value::<#ty>(
+                    #name: flowd::redis::from_redis_value::<#ty>(
                         #lookup.ok_or_else(|| format!("missing field: `{}`", #key))?
                     ).map_err(|e| format!("failed to parse field `{}`: {}", #key, e))?,
                 }
@@ -237,7 +237,7 @@ pub fn derive_hash_mapper(input: TokenStream) -> TokenStream {
 
     // ── From<Struct> for Vec<(String, redis::Value)> ─────────────────────────
     let from_struct_impl = quote! {
-        impl From<#struct_name> for Vec<(String, hash_mapper::redis::Value)> {
+        impl From<#struct_name> for Vec<(String, flowd::redis::Value)> {
             fn from(val: #struct_name) -> Self {
                 #struct_name::try_to_pairs(val).unwrap_or_default()
             }
@@ -246,23 +246,23 @@ pub fn derive_hash_mapper(input: TokenStream) -> TokenStream {
 
     // ── TryFrom<Vec<(String, redis::Value)>> for Struct (owned + borrowed) ───
     let try_from_impl = quote! {
-        impl TryFrom<Vec<(String, hash_mapper::redis::Value)>> for #struct_name {
+        impl TryFrom<Vec<(String, flowd::redis::Value)>> for #struct_name {
             type Error = String;
 
             fn try_from(
-                pairs: Vec<(String, hash_mapper::redis::Value)>
+                pairs: Vec<(String, flowd::redis::Value)>
             ) -> Result<Self, Self::Error> {
                 Self::try_from(pairs.as_slice())
             }
         }
 
-        impl TryFrom<&[(String, hash_mapper::redis::Value)]> for #struct_name {
+        impl TryFrom<&[(String, flowd::redis::Value)]> for #struct_name {
             type Error = String;
 
             fn try_from(
-                pairs: &[(String, hash_mapper::redis::Value)]
+                pairs: &[(String, flowd::redis::Value)]
             ) -> Result<Self, Self::Error> {
-                let map: std::collections::HashMap<&str, &hash_mapper::redis::Value> = pairs
+                let map: std::collections::HashMap<&str, &flowd::redis::Value> = pairs
                     .iter()
                     .map(|(k, v)| (k.as_str(), v))
                     .collect();
@@ -280,11 +280,11 @@ pub fn derive_hash_mapper(input: TokenStream) -> TokenStream {
             fn try_from(
                 pairs: Vec<(&str, &str)>
             ) -> Result<Self, Self::Error> {
-                let owned: Vec<(String, hash_mapper::redis::Value)> = pairs
+                let owned: Vec<(String, flowd::redis::Value)> = pairs
                     .into_iter()
                     .map(|(k, v)| (
                         k.to_string(),
-                        hash_mapper::redis::Value::BulkString(v.as_bytes().to_vec()),
+                        flowd::redis::Value::BulkString(v.as_bytes().to_vec()),
                     ))
                     .collect();
                 Self::try_from(owned)
@@ -292,12 +292,12 @@ pub fn derive_hash_mapper(input: TokenStream) -> TokenStream {
         }
     };
 
-    // ── HashMappable companion trait impl ────────────────────────────────────
-    let hash_mappable_impl = quote! {
+    // ── Job companion trait impl ────────────────────────────────────
+    let job_trait_impl = quote! {
         impl #struct_name {
             pub fn try_to_pairs(
                 self
-            ) -> Result<Vec<(String, hash_mapper::redis::Value)>, String> {
+            ) -> Result<Vec<(String, flowd::redis::Value)>, String> {
                 let mut pairs = Vec::with_capacity(#field_count);
                 let val = self;
                 #(#to_pairs_pushes)*
@@ -305,15 +305,15 @@ pub fn derive_hash_mapper(input: TokenStream) -> TokenStream {
             }
         }
 
-        impl hash_mapper::HashMappable for #struct_name {
+        impl flowd::Job for #struct_name {
             fn try_to_pairs(
                 self
-            ) -> Result<Vec<(String, hash_mapper::redis::Value)>, String> {
+            ) -> Result<Vec<(String, flowd::redis::Value)>, String> {
                 #struct_name::try_to_pairs(self)
             }
 
             fn try_from_pairs(
-                pairs: &[(String, hash_mapper::redis::Value)]
+                pairs: &[(String, flowd::redis::Value)]
             ) -> Result<Self, String> {
                 Self::try_from(pairs)
             }
@@ -328,7 +328,7 @@ pub fn derive_hash_mapper(input: TokenStream) -> TokenStream {
         #from_struct_impl
         #try_from_impl
         #from_borrowed_impl
-        #hash_mappable_impl
+        #job_trait_impl
     }
     .into()
 }

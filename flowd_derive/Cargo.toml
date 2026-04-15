@@ -1,5 +1,5 @@
 [package]
-name    = "hash_mapper_derive"
+name    = "flowd_derive"
 version = "0.1.0"
 edition = "2024"
 

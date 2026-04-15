@@ -1,9 +1,9 @@
-use crate::HashMappable;
+use crate::Job;
 use redis::{AsyncTypedCommands, aio::MultiplexedConnection};
 
 // Collect stream message fields into pairs and deserialize into the
 // payload struct. Returns None (with a log) if deserialization fails.
-pub(super) fn parse_message<I: HashMappable>(
+pub(super) fn parse_message<I: Job>(
    map: impl IntoIterator<Item = (String, redis::Value)>,
 ) -> Option<I> {
    // Collect the HashMap from the StreamId into a Vec for try_from_pairs

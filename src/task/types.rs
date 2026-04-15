@@ -1,4 +1,4 @@
-use crate::HashMappable;
+use crate::Job;
 use crate::runtime::{Runtime, SelectedRuntime};
 use redis::aio::MultiplexedConnection;
 use std::sync::atomic::AtomicBool;
@@ -8,10 +8,10 @@ use std::{marker::PhantomData, sync::Arc};
 ///
 /// The `id` is passed directly to `XADD` as the message ID. Use `"*"` to
 /// let Redis auto-generate a timestamp-based ID.
-pub struct Task<T: HashMappable> {
+pub struct Task<T: Job> {
    /// Stream message ID (e.g. `"*"` for auto-generated, or a specific ID).
    pub id: String,
-   /// The payload to serialize into stream fields via [`HashMappable`].
+   /// The payload to serialize into stream fields via [`Job`].
    pub payload: T,
 }
 
@@ -21,7 +21,7 @@ pub struct Task<T: HashMappable> {
 /// Messages whose delivery count exceeds [`max_retries`](Self::max_retries)
 /// are routed to the optional [`dlq_worker`](Self::dlq_worker) callback and
 /// then acknowledged to remove them from the PEL.
-pub struct Claimer<I: HashMappable, DE, DF, DFut>
+pub struct Claimer<I: Job, DE, DF, DFut>
 where
    DF: Fn(&I, usize) -> DFut,
    DE: std::fmt::Display,
@@ -47,7 +47,7 @@ where
 
 /// Builder for constructing a [`Claimer`]. Fields mirror [`Claimer`] with
 /// additional `Send + Sync + 'static` bounds required for spawning.
-pub struct ClaimerBuilder<I: HashMappable, DE, DF, DFut>
+pub struct ClaimerBuilder<I: Job, DE, DF, DFut>
 where
    DF: Fn(&I, usize) -> DFut + 'static + Send + Sync,
    DE: std::fmt::Display + Send + 'static,
@@ -74,14 +74,14 @@ where
 ///
 /// | Param | Role |
 /// |-------|------|
-/// | `I`   | Payload type (must implement [`HashMappable`]) |
+/// | `I`   | Payload type (must implement [`Job`]) |
 /// | `E`   | Error type returned by the worker |
 /// | `F`   | Worker closure: `Fn(&I) -> Fut` |
 /// | `Fut` | Future returned by the worker |
 /// | `DE`  | Error type returned by the DLQ worker |
 /// | `DF`  | DLQ worker closure: `Fn(&I, usize) -> DFut` |
 /// | `DFut`| Future returned by the DLQ worker |
-pub struct Queue<I: HashMappable, E, F, Fut, DE, DF, DFut>
+pub struct Queue<I: Job, E, F, Fut, DE, DF, DFut>
 where
    F: Fn(&I) -> Fut,
    E: std::fmt::Display,
@@ -108,7 +108,7 @@ where
 /// Pass it to [`Queue::new()`] to create the queue.
 pub struct QueueBuilder<I, E, F, Fut, DE, DF, DFut>
 where
-   I: HashMappable,
+   I: Job,
    F: Fn(&I) -> Fut + 'static + Send + Sync,
    E: std::fmt::Display + Send + 'static,
    Fut: Future<Output = Result<(), E>> + Send,

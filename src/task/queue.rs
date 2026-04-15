@@ -1,6 +1,6 @@
 use super::helpers::{ack, parse_message, process_and_ack};
 use super::types::{Queue, QueueBuilder, QueueHandle, Task};
-use crate::HashMappable;
+use crate::Job;
 use crate::runtime::{Runtime, SelectedRuntime};
 use crate::task::Claimer;
 use anyhow::Error;
@@ -27,7 +27,7 @@ impl QueueHandle {
 
 impl<I, E, F, Fut, DE, DF, DFut> Queue<I, E, F, Fut, DE, DF, DFut>
 where
-   I: HashMappable + Send + Sync + 'static,
+   I: Job + Send + Sync + 'static,
    F: Fn(&I) -> Fut + 'static + Send + Sync,
    E: std::fmt::Display + Send + 'static,
    Fut: Future<Output = Result<(), E>> + Send,
@@ -95,7 +95,7 @@ where
 
    /// Publish a [`Task`] to the stream via `XADD`.
    ///
-   /// The task's payload is serialized to pairs via [`HashMappable::try_to_pairs()`],
+   /// The task's payload is serialized to pairs via [`Job::try_to_pairs()`],
    /// and each `BulkString` value is written as a raw field.
    pub async fn enqueue(&mut self, task: Task<I>) -> Result<(), Error> {
       // Serialize the payload struct into (field_name, redis::Value) pairs

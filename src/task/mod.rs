@@ -28,7 +28,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use hash_mapper::task::*;
+//! use flowd::task::*;
 //! use std::sync::Arc;
 //!
 //! let queue = Queue::new(QueueBuilder {

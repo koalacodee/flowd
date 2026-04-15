@@ -1,11 +1,11 @@
-//! # hash_mapper
+//! # flowd
 //!
 //! A Redis Streams-backed task queue with automatic struct ↔ `redis::Value`
 //! mapping via a derive macro.
 //!
 //! ## Features
 //!
-//! - **`HashMapper` derive macro** — generates bidirectional conversions between
+//! - **`Job` derive macro** — generates bidirectional conversions between
 //!   Rust structs and `Vec<(String, redis::Value)>` pairs for zero-copy Redis
 //!   integration.
 //! - **Consumer queue** — reads from a Redis Stream consumer group with
@@ -18,11 +18,11 @@
 //! ## Quick start
 //!
 //! ```rust,ignore
-//! use hash_mapper::prelude::*;
-//! use hash_mapper::task::{Task, Queue, QueueBuilder};
+//! use flowd::prelude::*;
+//! use flowd::task::{Task, Queue, QueueBuilder};
 //!
-//! #[derive(Debug, HashMapper)]
-//! struct Job {
+//! #[derive(Debug, Job)]
+//! struct Email {
 //!     url: String,
 //!     retries: u32,
 //! }
@@ -34,7 +34,7 @@
 //!     consumer_id: "worker-1".into(),
 //!     block_timeout: 5000,
 //!     max_concurrent_tasks: 10,
-//!     worker: Arc::new(|job: &Job| async move {
+//!     worker: Arc::new(|job: &Email| async move {
 //!         println!("processing {}", job.url);
 //!         Ok::<(), String>(())
 //!     }),
@@ -61,10 +61,9 @@ compile_error!("features `tokio` and `smol` are mutually exclusive");
 #[cfg(not(any(feature = "tokio", feature = "smol")))]
 compile_error!("either feature `tokio` or `smol` must be enabled");
 
-pub use crate::hash_mappable::HashMappable;
+pub use crate::job::Job;
 use anyhow::Error;
-pub use hash_mapper_derive::HashMapper;
-pub mod hash_mappable;
+pub mod job;
 mod runtime;
 pub mod task;
 
@@ -74,8 +73,8 @@ pub use redis;
 
 // ── Generic utilities ─────────────────────────────────────────────────────────
 
-/// Pretty-print every field of a `HashMappable` value.
-pub fn debug_map<T: HashMappable + std::fmt::Debug>(value: T) -> Result<(), Error> {
+/// Pretty-print every field of a `Job` value.
+pub fn debug_map<T: Job + std::fmt::Debug>(value: T) -> Result<(), Error> {
     // Serialize the struct into its Redis-ready pairs
     let pairs = value.try_to_pairs().map_err(|e| anyhow::anyhow!(e))?;
     // Print each field name right-aligned with its debug representation
@@ -86,7 +85,7 @@ pub fn debug_map<T: HashMappable + std::fmt::Debug>(value: T) -> Result<(), Erro
 }
 
 /// Round-trip a value through pairs — useful for testing your mapper.
-pub fn round_trip<T: HashMappable>(value: T) -> Result<T, Error> {
+pub fn round_trip<T: Job>(value: T) -> Result<T, Error> {
     // Serialize to pairs, then immediately deserialize back
     let pairs = value.try_to_pairs().map_err(|e| anyhow::anyhow!(e))?;
     T::try_from_pairs(&pairs).map_err(|e| anyhow::anyhow!(e))
@@ -97,8 +96,8 @@ pub fn round_trip<T: HashMappable>(value: T) -> Result<T, Error> {
 /// Convenience re-exports for common usage.
 ///
 /// ```rust,ignore
-/// use hash_mapper::prelude::*;
+/// use flowd::prelude::*;
 /// ```
 pub mod prelude {
-    pub use super::{HashMappable, HashMapper, debug_map, round_trip};
+    pub use super::{Job, debug_map, round_trip};
 }

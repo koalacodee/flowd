@@ -1,4 +1,5 @@
 use crate::HashMappable;
+use crate::runtime::{Runtime, SelectedRuntime};
 use anyhow::Error;
 use redis::{AsyncTypedCommands, aio::MultiplexedConnection};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -82,14 +83,8 @@ where
 /// the consumer and claimer loops, waiting for all in-flight tasks to finish.
 pub struct QueueHandle {
    shutdown: Arc<AtomicBool>,
-   #[cfg(feature = "tokio")]
-   main_join: tokio::task::JoinHandle<()>,
-   #[cfg(feature = "tokio")]
-   claimer_join: Option<tokio::task::JoinHandle<()>>,
-   #[cfg(feature = "async-std")]
-   main_join: async_std::task::JoinHandle<()>,
-   #[cfg(feature = "async-std")]
-   claimer_join: Option<async_std::task::JoinHandle<()>>,
+   main_join: <SelectedRuntime as Runtime>::JoinHandle,
+   claimer_join: Option<<SelectedRuntime as Runtime>::JoinHandle>,
 }
 
 impl QueueHandle {
@@ -97,19 +92,9 @@ impl QueueHandle {
    /// for all in-flight tasks to complete before returning.
    pub async fn shutdown(self) {
       self.shutdown.store(true, Ordering::Relaxed);
-      #[cfg(feature = "tokio")]
-      {
-         let _ = self.main_join.await;
-         if let Some(claimer_join) = self.claimer_join {
-            let _ = claimer_join.await;
-         }
-      }
-      #[cfg(feature = "async-std")]
-      {
-         self.main_join.await;
-         if let Some(claimer_join) = self.claimer_join {
-            claimer_join.await;
-         }
+      SelectedRuntime::join(self.main_join).await;
+      if let Some(claimer_join) = self.claimer_join {
+         SelectedRuntime::join(claimer_join).await;
       }
    }
 }
@@ -187,11 +172,9 @@ where
       let conn = self.conn;
 
       // ── Main consumer loop ────────────────────────────────────────────────
-      let main_join;
-      #[cfg(feature = "tokio")]
-      {
+      let main_join = {
          let shutdown_flag = Arc::clone(&shutdown);
-         let semaphore = Arc::new(tokio::sync::Semaphore::new(self.max_concurrent_tasks));
+         let semaphore = SelectedRuntime::new_semaphore(self.max_concurrent_tasks);
          let name = Arc::clone(&name);
          let consumer_group = Arc::clone(&consumer_group);
          let consumer_id = Arc::clone(&consumer_id);
@@ -199,20 +182,19 @@ where
          let conn = conn.clone();
          let block_timeout = self.block_timeout;
 
-         main_join = tokio::spawn(async move {
+         SelectedRuntime::spawn(async move {
             use redis::streams::{StreamReadOptions, StreamReadReply};
-            use tokio::task::JoinSet;
 
-            let mut set: JoinSet<Result<(), Error>> = JoinSet::new();
+            let mut set = SelectedRuntime::new_task_set();
 
             loop {
                if shutdown_flag.load(Ordering::Relaxed) {
                   break;
                }
 
-               let available = semaphore.available_permits();
+               let available = SelectedRuntime::available_permits(&semaphore);
                if available == 0 {
-                  let _permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+                  SelectedRuntime::wait_for_permit(&semaphore).await;
                   continue;
                }
 
@@ -236,108 +218,14 @@ where
                if let Some(reply) = reply {
                   for stream_key in reply.keys {
                      for message in stream_key.ids {
-                        let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+                        let permit =
+                           SelectedRuntime::acquire_permit(Arc::clone(&semaphore)).await;
                         let mut conn = conn.clone();
                         let name = Arc::clone(&name);
                         let consumer_group = Arc::clone(&consumer_group);
                         let worker = Arc::clone(&worker);
 
-                        set.spawn(async move {
-                           let _permit = permit;
-
-                           let pairs: Vec<(String, redis::Value)> =
-                              message.map.into_iter().collect();
-
-                           let input =
-                              I::try_from_pairs(&pairs).map_err(|e| anyhow::anyhow!(e))?;
-
-                           let handler_result = (worker)(&input).await;
-
-                           match handler_result {
-                              Ok(_) => {
-                                 conn.xack(
-                                    name.as_str(),
-                                    consumer_group.as_str(),
-                                    &[&message.id],
-                                 )
-                                 .await?;
-                              }
-                              Err(e) => {
-                                 eprintln!("worker failed: {e}");
-                              }
-                           }
-
-                           Ok(())
-                        });
-                     }
-                  }
-               }
-            }
-
-            while let Some(result) = set.join_next().await {
-               if let Err(e) = result {
-                  eprintln!("task failed during shutdown: {e}");
-               }
-            }
-         });
-      }
-
-      #[cfg(feature = "async-std")]
-      {
-         let shutdown_flag = Arc::clone(&shutdown);
-         let semaphore = Arc::new(mea::semaphore::Semaphore::new(self.max_concurrent_tasks));
-         let name = Arc::clone(&name);
-         let consumer_group = Arc::clone(&consumer_group);
-         let consumer_id = Arc::clone(&consumer_id);
-         let worker = Arc::clone(&worker);
-         let conn = conn.clone();
-         let block_timeout = self.block_timeout;
-
-         main_join = async_std::task::spawn(async move {
-            use futures::stream::{FuturesUnordered, StreamExt};
-            use redis::streams::{StreamReadOptions, StreamReadReply};
-
-            let mut tasks: FuturesUnordered<async_std::task::JoinHandle<()>> =
-               FuturesUnordered::new();
-
-            loop {
-               if shutdown_flag.load(Ordering::Relaxed) {
-                  break;
-               }
-
-               let available = semaphore.available_permits();
-               if available == 0 {
-                  let _permit = semaphore.acquire(1).await;
-                  continue;
-               }
-
-               let mut read_conn = conn.clone();
-               let opts = StreamReadOptions::default()
-                  .count(available)
-                  .block(block_timeout)
-                  .group(consumer_group.as_str(), consumer_id.as_str());
-
-               let reply: Option<StreamReadReply> = match read_conn
-                  .xread_options(&[name.as_str()], &[">"], &opts)
-                  .await
-               {
-                  Ok(r) => r,
-                  Err(e) => {
-                     eprintln!("failed to read from stream: {e}");
-                     continue;
-                  }
-               };
-
-               if let Some(reply) = reply {
-                  for stream_key in reply.keys {
-                     for message in stream_key.ids {
-                        let permit = Arc::clone(&semaphore).acquire_owned(1).await;
-                        let mut conn = conn.clone();
-                        let name = Arc::clone(&name);
-                        let consumer_group = Arc::clone(&consumer_group);
-                        let worker = Arc::clone(&worker);
-
-                        tasks.push(async_std::task::spawn(async move {
+                        SelectedRuntime::spawn_task(&mut set, async move {
                            let _permit = permit;
 
                            let pairs: Vec<(String, redis::Value)> =
@@ -370,308 +258,164 @@ where
                                  eprintln!("worker failed: {e}");
                               }
                            }
-                        }));
+                        });
                      }
                   }
                }
             }
 
-            while tasks.next().await.is_some() {}
-         });
-      }
+            SelectedRuntime::drain_task_set(&mut set).await;
+         })
+      };
 
       // ── Claimer loop ──────────────────────────────────────────────────────
-      let claimer_join;
-
-      if let Some(claimer) = self.claimer {
+      let claimer_join = if let Some(claimer) = self.claimer {
          let dlq_worker = claimer.dlq_worker;
          let max_retries = claimer.max_retries;
          let claimer_block_timeout = claimer.block_timeout;
          let min_idle_time = claimer.min_idle_time;
 
-         #[cfg(feature = "tokio")]
-         {
-            let shutdown_flag = Arc::clone(&shutdown);
-            let semaphore =
-               Arc::new(tokio::sync::Semaphore::new(claimer.max_concurrent_tasks));
-            let name = Arc::clone(&name);
-            let consumer_group = Arc::clone(&consumer_group);
-            let consumer_id = Arc::clone(&consumer_id);
-            let worker = Arc::clone(&worker);
-            let dlq_worker = dlq_worker.as_ref().map(Arc::clone);
-            let conn = conn.clone();
+         let shutdown_flag = Arc::clone(&shutdown);
+         let semaphore = SelectedRuntime::new_semaphore(claimer.max_concurrent_tasks);
+         let name = Arc::clone(&name);
+         let consumer_group = Arc::clone(&consumer_group);
+         let consumer_id = Arc::clone(&consumer_id);
+         let worker = Arc::clone(&worker);
+         let dlq_worker = dlq_worker.as_ref().map(Arc::clone);
+         let conn = conn.clone();
 
-            claimer_join = Some(tokio::spawn(async move {
-               use redis::streams::{StreamAutoClaimOptions, StreamAutoClaimReply};
-               use tokio::task::JoinSet;
+         Some(SelectedRuntime::spawn(async move {
+            use redis::streams::{StreamAutoClaimOptions, StreamAutoClaimReply};
 
-               let mut set: JoinSet<Result<(), Error>> = JoinSet::new();
+            let mut set = SelectedRuntime::new_task_set();
 
-               loop {
-                  if shutdown_flag.load(Ordering::Relaxed) {
-                     break;
-                  }
+            loop {
+               if shutdown_flag.load(Ordering::Relaxed) {
+                  break;
+               }
 
-                  let available = semaphore.available_permits();
-                  if available == 0 {
-                     let _permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
-                     continue;
-                  }
+               let available = SelectedRuntime::available_permits(&semaphore);
+               if available == 0 {
+                  SelectedRuntime::wait_for_permit(&semaphore).await;
+                  continue;
+               }
 
-                  let mut claim_conn = conn.clone();
-                  let opts = StreamAutoClaimOptions::default().count(available);
+               let mut claim_conn = conn.clone();
+               let opts = StreamAutoClaimOptions::default().count(available);
 
-                  let reply: StreamAutoClaimReply = match claim_conn
-                     .xautoclaim_options(
-                        name.as_str(),
-                        consumer_group.as_str(),
-                        consumer_id.as_str(),
-                        min_idle_time,
-                        "0-0",
-                        opts,
-                     )
-                     .await
-                  {
-                     Ok(r) => r,
-                     Err(e) => {
-                        eprintln!("failed to autoclaim from stream: {e}");
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                           claimer_block_timeout as u64,
-                        ))
-                        .await;
-                        continue;
-                     }
-                  };
-
-                  if reply.claimed.is_empty() {
-                     tokio::time::sleep(std::time::Duration::from_millis(
+               let reply: StreamAutoClaimReply = match claim_conn
+                  .xautoclaim_options(
+                     name.as_str(),
+                     consumer_group.as_str(),
+                     consumer_id.as_str(),
+                     min_idle_time,
+                     "0-0",
+                     opts,
+                  )
+                  .await
+               {
+                  Ok(r) => r,
+                  Err(e) => {
+                     eprintln!("failed to autoclaim from stream: {e}");
+                     SelectedRuntime::sleep(std::time::Duration::from_millis(
                         claimer_block_timeout as u64,
                      ))
                      .await;
                      continue;
                   }
+               };
 
-                  // Get delivery counts for claimed messages
-                  let claimed_ids: Vec<&str> =
-                     reply.claimed.iter().map(|m| m.id.as_str()).collect();
-                  let first_id = claimed_ids.first().unwrap().to_string();
-                  let last_id = claimed_ids.last().unwrap().to_string();
+               if reply.claimed.is_empty() {
+                  SelectedRuntime::sleep(std::time::Duration::from_millis(
+                     claimer_block_timeout as u64,
+                  ))
+                  .await;
+                  continue;
+               }
 
-                  let mut pending_conn = conn.clone();
-                  let pending: redis::streams::StreamPendingCountReply = match pending_conn
-                     .xpending_count(
-                        name.as_str(),
-                        consumer_group.as_str(),
-                        &first_id,
-                        &last_id,
-                        reply.claimed.len(),
-                     )
-                     .await
-                  {
-                     Ok(p) => p,
-                     Err(e) => {
-                        eprintln!("failed to get pending info: {e}");
-                        continue;
-                     }
-                  };
+               // Get delivery counts for claimed messages
+               let claimed_ids: Vec<&str> =
+                  reply.claimed.iter().map(|m| m.id.as_str()).collect();
+               let first_id = claimed_ids.first().unwrap().to_string();
+               let last_id = claimed_ids.last().unwrap().to_string();
 
-                  // Build a map of id → times_delivered
-                  let delivery_counts: std::collections::HashMap<&str, usize> = pending
-                     .ids
-                     .iter()
-                     .map(|p| (p.id.as_str(), p.times_delivered))
-                     .collect();
+               let mut pending_conn = conn.clone();
+               let pending: redis::streams::StreamPendingCountReply = match pending_conn
+                  .xpending_count(
+                     name.as_str(),
+                     consumer_group.as_str(),
+                     &first_id,
+                     &last_id,
+                     reply.claimed.len(),
+                  )
+                  .await
+               {
+                  Ok(p) => p,
+                  Err(e) => {
+                     eprintln!("failed to get pending info: {e}");
+                     continue;
+                  }
+               };
 
-                  for message in reply.claimed {
-                     let times_delivered =
-                        delivery_counts.get(message.id.as_str()).copied().unwrap_or(1);
+               // Build a map of id → times_delivered
+               let delivery_counts: std::collections::HashMap<&str, usize> = pending
+                  .ids
+                  .iter()
+                  .map(|p| (p.id.as_str(), p.times_delivered))
+                  .collect();
 
-                     let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
-                     let mut conn = conn.clone();
-                     let name = Arc::clone(&name);
-                     let consumer_group = Arc::clone(&consumer_group);
-                     let worker = Arc::clone(&worker);
-                     let dlq_worker = dlq_worker.clone();
+               for message in reply.claimed {
+                  let times_delivered =
+                     delivery_counts.get(message.id.as_str()).copied().unwrap_or(1);
 
-                     set.spawn(async move {
-                        let _permit = permit;
+                  let permit =
+                     SelectedRuntime::acquire_permit(Arc::clone(&semaphore)).await;
+                  let mut conn = conn.clone();
+                  let name = Arc::clone(&name);
+                  let consumer_group = Arc::clone(&consumer_group);
+                  let worker = Arc::clone(&worker);
+                  let dlq_worker = dlq_worker.clone();
 
-                        let pairs: Vec<(String, redis::Value)> =
-                           message.map.into_iter().collect();
+                  SelectedRuntime::spawn_task(&mut set, async move {
+                     let _permit = permit;
 
-                        let input =
-                           I::try_from_pairs(&pairs).map_err(|e| anyhow::anyhow!(e))?;
+                     let pairs: Vec<(String, redis::Value)> =
+                        message.map.into_iter().collect();
 
-                        if times_delivered > max_retries {
-                           // Max retries exceeded — send to DLQ if configured
-                           if let Some(dlq) = &dlq_worker {
-                              if let Err(e) = (dlq)(&input, times_delivered).await {
-                                 eprintln!("dlq worker failed: {e}");
-                              }
+                     let input = match I::try_from_pairs(&pairs) {
+                        Ok(v) => v,
+                        Err(e) => {
+                           eprintln!("failed to parse task: {e}");
+                           return;
+                        }
+                     };
+
+                     if times_delivered > max_retries {
+                        // Max retries exceeded — send to DLQ if configured
+                        if let Some(dlq) = &dlq_worker {
+                           if let Err(e) = (dlq)(&input, times_delivered).await {
+                              eprintln!("dlq worker failed: {e}");
                            }
-                           // ACK to remove from PEL regardless
-                           conn.xack(
+                        }
+                        // ACK to remove from PEL regardless
+                        if let Err(e) = conn
+                           .xack(
                               name.as_str(),
                               consumer_group.as_str(),
                               &[&message.id],
                            )
-                           .await?;
-                           return Ok(());
+                           .await
+                        {
+                           eprintln!("failed to ack dead-lettered message: {e}");
                         }
-
-                        // Normal retry
-                        let handler_result = (worker)(&input).await;
-
-                        match handler_result {
-                           Ok(_) => {
-                              conn.xack(
-                                 name.as_str(),
-                                 consumer_group.as_str(),
-                                 &[&message.id],
-                              )
-                              .await?;
-                           }
-                           Err(e) => {
-                              eprintln!("worker failed (retry {}): {e}", times_delivered);
-                           }
-                        }
-
-                        Ok(())
-                     });
-                  }
-               }
-
-               while let Some(result) = set.join_next().await {
-                  if let Err(e) = result {
-                     eprintln!("claimer task failed during shutdown: {e}");
-                  }
-               }
-            }));
-         }
-
-         #[cfg(feature = "async-std")]
-         {
-            let shutdown_flag = Arc::clone(&shutdown);
-            let semaphore =
-               Arc::new(mea::semaphore::Semaphore::new(claimer.max_concurrent_tasks));
-            let name = Arc::clone(&name);
-            let consumer_group = Arc::clone(&consumer_group);
-            let consumer_id = Arc::clone(&consumer_id);
-            let worker = Arc::clone(&worker);
-            let dlq_worker = dlq_worker.as_ref().map(Arc::clone);
-            let conn = conn.clone();
-
-            claimer_join = Some(async_std::task::spawn(async move {
-               use futures::stream::{FuturesUnordered, StreamExt};
-               use redis::streams::{StreamAutoClaimOptions, StreamAutoClaimReply};
-
-               let mut tasks: FuturesUnordered<async_std::task::JoinHandle<()>> =
-                  FuturesUnordered::new();
-
-               loop {
-                  if shutdown_flag.load(Ordering::Relaxed) {
-                     break;
-                  }
-
-                  let available = semaphore.available_permits();
-                  if available == 0 {
-                     let _permit = semaphore.acquire(1).await;
-                     continue;
-                  }
-
-                  let mut claim_conn = conn.clone();
-                  let opts = StreamAutoClaimOptions::default().count(available);
-
-                  let reply: StreamAutoClaimReply = match claim_conn
-                     .xautoclaim_options(
-                        name.as_str(),
-                        consumer_group.as_str(),
-                        consumer_id.as_str(),
-                        min_idle_time,
-                        "0-0",
-                        opts,
-                     )
-                     .await
-                  {
-                     Ok(r) => r,
-                     Err(e) => {
-                        eprintln!("failed to autoclaim from stream: {e}");
-                        async_std::task::sleep(std::time::Duration::from_millis(
-                           claimer_block_timeout as u64,
-                        ))
-                        .await;
-                        continue;
+                        return;
                      }
-                  };
 
-                  if reply.claimed.is_empty() {
-                     async_std::task::sleep(std::time::Duration::from_millis(
-                        claimer_block_timeout as u64,
-                     ))
-                     .await;
-                     continue;
-                  }
+                     // Normal retry
+                     let handler_result = (worker)(&input).await;
 
-                  let claimed_ids: Vec<&str> =
-                     reply.claimed.iter().map(|m| m.id.as_str()).collect();
-                  let first_id = claimed_ids.first().unwrap().to_string();
-                  let last_id = claimed_ids.last().unwrap().to_string();
-
-                  let mut pending_conn = conn.clone();
-                  let pending: redis::streams::StreamPendingCountReply = match pending_conn
-                     .xpending_count(
-                        name.as_str(),
-                        consumer_group.as_str(),
-                        &first_id,
-                        &last_id,
-                        reply.claimed.len(),
-                     )
-                     .await
-                  {
-                     Ok(p) => p,
-                     Err(e) => {
-                        eprintln!("failed to get pending info: {e}");
-                        continue;
-                     }
-                  };
-
-                  let delivery_counts: std::collections::HashMap<&str, usize> = pending
-                     .ids
-                     .iter()
-                     .map(|p| (p.id.as_str(), p.times_delivered))
-                     .collect();
-
-                  for message in reply.claimed {
-                     let times_delivered =
-                        delivery_counts.get(message.id.as_str()).copied().unwrap_or(1);
-
-                     let permit = Arc::clone(&semaphore).acquire_owned(1).await;
-                     let mut conn = conn.clone();
-                     let name = Arc::clone(&name);
-                     let consumer_group = Arc::clone(&consumer_group);
-                     let worker = Arc::clone(&worker);
-                     let dlq_worker = dlq_worker.clone();
-
-                     tasks.push(async_std::task::spawn(async move {
-                        let _permit = permit;
-
-                        let pairs: Vec<(String, redis::Value)> =
-                           message.map.into_iter().collect();
-
-                        let input = match I::try_from_pairs(&pairs) {
-                           Ok(v) => v,
-                           Err(e) => {
-                              eprintln!("failed to parse task: {e}");
-                              return;
-                           }
-                        };
-
-                        if times_delivered > max_retries {
-                           if let Some(dlq) = &dlq_worker {
-                              if let Err(e) = (dlq)(&input, times_delivered).await {
-                                 eprintln!("dlq worker failed: {e}");
-                              }
-                           }
+                     match handler_result {
+                        Ok(_) => {
                            if let Err(e) = conn
                               .xack(
                                  name.as_str(),
@@ -680,40 +424,22 @@ where
                               )
                               .await
                            {
-                              eprintln!("failed to ack dead-lettered message: {e}");
-                           }
-                           return;
-                        }
-
-                        let handler_result = (worker)(&input).await;
-
-                        match handler_result {
-                           Ok(_) => {
-                              if let Err(e) = conn
-                                 .xack(
-                                    name.as_str(),
-                                    consumer_group.as_str(),
-                                    &[&message.id],
-                                 )
-                                 .await
-                              {
-                                 eprintln!("failed to ack message: {e}");
-                              }
-                           }
-                           Err(e) => {
-                              eprintln!("worker failed (retry {}): {e}", times_delivered);
+                              eprintln!("failed to ack message: {e}");
                            }
                         }
-                     }));
-                  }
+                        Err(e) => {
+                           eprintln!("worker failed (retry {}): {e}", times_delivered);
+                        }
+                     }
+                  });
                }
+            }
 
-               while tasks.next().await.is_some() {}
-            }));
-         }
+            SelectedRuntime::drain_task_set(&mut set).await;
+         }))
       } else {
-         claimer_join = None;
-      }
+         None
+      };
 
       QueueHandle {
          shutdown,

@@ -8,6 +8,7 @@ pub use crate::hash_mappable::HashMappable;
 use anyhow::Error;
 pub use hash_mapper_derive::HashMapper;
 pub mod hash_mappable;
+mod runtime;
 pub mod task;
 
 // Re-export for use by the derive macro's generated code

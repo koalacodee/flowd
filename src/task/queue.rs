@@ -118,6 +118,48 @@ where
       Ok(())
    }
 
+   /// Publish multiple [`Task`]s to the stream in a single Redis pipeline.
+   ///
+   /// Each task is serialized and added via `XADD`. The entire batch is sent
+   /// as one round-trip, making this significantly more efficient than
+   /// calling [`enqueue()`](Self::enqueue) in a loop.
+   pub async fn enqueue_bulk(&mut self, tasks: Vec<Task<I>>) -> Result<(), Error> {
+      // Pre-serialize all tasks so we can reference their data when building
+      // the pipeline commands
+      let serialized: Vec<(String, Vec<(String, Vec<u8>)>)> = tasks
+         .into_iter()
+         .map(|task| {
+            let pairs = task
+               .payload
+               .try_to_pairs()
+               .map_err(|e| anyhow::anyhow!(e))?;
+
+            let items: Vec<(String, Vec<u8>)> = pairs
+               .into_iter()
+               .filter_map(|(k, v)| match v {
+                  redis::Value::BulkString(bytes) => Some((k, bytes)),
+                  _ => None,
+               })
+               .collect();
+
+            Ok((task.id, items))
+         })
+         .collect::<Result<_, Error>>()?;
+
+      let mut pipe = redis::pipe();
+      for (id, items) in &serialized {
+         let refs: Vec<(&str, &[u8])> = items
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+            .collect();
+         pipe.xadd(&self.name, id.as_str(), &refs);
+      }
+
+      // Send all XADDs in a single round-trip
+      pipe.query_async::<()>(&mut self.conn).await?;
+      Ok(())
+   }
+
    /// Consume the `Queue` and spawn the consumer (and optional claimer) loops.
    ///
    /// Returns a [`QueueHandle`] that can be used to trigger graceful

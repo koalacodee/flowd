@@ -1,6 +1,14 @@
+//! Runtime abstraction layer.
+//!
+//! Provides a single [`Runtime`] trait that unifies the differences between
+//! `tokio` and `async-std`, so the rest of the crate can be written once
+//! against [`SelectedRuntime`] without `#[cfg]` duplication.
+
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Trait abstracting async runtime primitives (spawning, sleeping, semaphores,
+/// task sets). Each associated type maps to the runtime's concrete type.
 pub(crate) trait Runtime: 'static {
    type JoinHandle: Send;
    type Permit: Send + 'static;
@@ -38,6 +46,7 @@ impl Runtime for TokioRuntime {
    }
 
    fn join(handle: Self::JoinHandle) -> impl Future<Output = ()> + Send {
+      // Await the handle, discarding the JoinError (panic in task)
       async { let _ = handle.await; }
    }
 
@@ -54,10 +63,12 @@ impl Runtime for TokioRuntime {
    }
 
    fn wait_for_permit(sem: &Arc<Self::Semaphore>) -> impl Future<Output = ()> + Send + '_ {
+      // Acquire and immediately drop — used only to block until a slot opens
       async { let _ = sem.acquire().await.unwrap(); }
    }
 
    fn acquire_permit(sem: Arc<Self::Semaphore>) -> impl Future<Output = Self::Permit> + Send {
+      // Owned permit — kept alive for the duration of a spawned task
       async { sem.acquire_owned().await.unwrap() }
    }
 
@@ -66,11 +77,13 @@ impl Runtime for TokioRuntime {
    }
 
    fn spawn_task<F: Future<Output = ()> + Send + 'static>(set: &mut Self::TaskSet, fut: F) {
+      // JoinSet tracks the handle automatically
       set.spawn(fut);
    }
 
    fn drain_task_set(set: &mut Self::TaskSet) -> impl Future<Output = ()> + Send + '_ {
       async {
+         // Await every remaining task, logging panics
          while let Some(result) = set.join_next().await {
             if let Err(e) = result {
                eprintln!("task failed during shutdown: {e}");
@@ -113,10 +126,12 @@ impl Runtime for AsyncStdRuntime {
    }
 
    fn wait_for_permit(sem: &Arc<Self::Semaphore>) -> impl Future<Output = ()> + Send + '_ {
+      // Acquire 1 permit and immediately drop — blocks until a slot opens
       async { let _ = sem.acquire(1).await; }
    }
 
    fn acquire_permit(sem: Arc<Self::Semaphore>) -> impl Future<Output = Self::Permit> + Send {
+      // Owned permit (1 slot) — kept alive for the spawned task's lifetime
       async { sem.acquire_owned(1).await }
    }
 
@@ -126,12 +141,14 @@ impl Runtime for AsyncStdRuntime {
 
    fn spawn_task<F: Future<Output = ()> + Send + 'static>(set: &mut Self::TaskSet, fut: F) {
       use futures::stream::FuturesUnordered;
+      // Spawn the task and push its handle into the unordered set
       FuturesUnordered::push(set, async_std::task::spawn(fut));
    }
 
    fn drain_task_set(set: &mut Self::TaskSet) -> impl Future<Output = ()> + Send + '_ {
       async {
          use futures::stream::StreamExt;
+         // Poll all remaining handles to completion
          while set.next().await.is_some() {}
       }
    }
@@ -139,8 +156,12 @@ impl Runtime for AsyncStdRuntime {
 
 // ── Selected runtime ─────────────────────────────────────────────────────────
 
+/// Type alias that resolves to the runtime implementation matching the
+/// active feature flag. All consumer/claimer code is generic over this.
 #[cfg(feature = "tokio")]
 pub(crate) type SelectedRuntime = TokioRuntime;
 
+/// Type alias that resolves to the runtime implementation matching the
+/// active feature flag. All consumer/claimer code is generic over this.
 #[cfg(feature = "async-std")]
 pub(crate) type SelectedRuntime = AsyncStdRuntime;

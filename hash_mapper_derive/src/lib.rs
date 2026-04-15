@@ -16,10 +16,12 @@ fn parse_mapper_attr(attrs: &[Attribute]) -> FieldMapper {
     let mut deserialize = None;
 
     for attr in attrs {
+        // Skip non-#[mapper(...)] attributes
         if !attr.path().is_ident("mapper") {
             continue;
         }
 
+        // Parse key = "value" pairs inside #[mapper(...)]
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("serialize") {
                 serialize = Some(meta.value()?.parse()?);
@@ -39,16 +41,62 @@ fn parse_mapper_attr(attrs: &[Attribute]) -> FieldMapper {
 
 // ── Main derive macro ─────────────────────────────────────────────────────────
 
-/// Derives:
-/// - `From<TargetStruct> for Vec<(String, redis::Value)>`
-/// - `TryFrom<Vec<(String, redis::Value)>> for TargetStruct`  (owned + borrowed slice)
-/// - `TryFrom<Vec<(&str, &str)>> for TargetStruct`            (testing convenience)
-/// - `HashMappable` companion trait impl
+/// Derive macro that generates bidirectional conversions between a struct
+/// and `Vec<(String, redis::Value)>` pairs for zero-copy Redis integration.
+///
+/// # What it generates
+///
+/// - `From<Struct> for Vec<(String, redis::Value)>` — infallible owned conversion.
+/// - `TryFrom<Vec<(String, redis::Value)>> for Struct` — owned pairs.
+/// - `TryFrom<&[(String, redis::Value)]> for Struct` — borrowed pairs.
+/// - `TryFrom<Vec<(&str, &str)>> for Struct` — convenience for tests.
+/// - `HashMappable` trait impl (used by the task queue internals).
+///
+/// # Field-level attributes
+///
+/// Use `#[mapper(...)]` to customize serialization per field:
+///
+/// | Attribute | Signature | Effect |
+/// |-----------|-----------|--------|
+/// | `serialize = "path"` | `fn(&T) -> Result<String, E>` | Replaces default `Display` serialization |
+/// | `deserialize = "path"` | `fn(&str) -> Result<T, E>` | Replaces default `FromRedisValue` deserialization |
+///
+/// # Type support
+///
+/// - **Required fields** — must implement `Display` (serialize) and
+///   `FromRedisValue` (deserialize), or use custom attributes.
+/// - **`Option<T>`** — `None` is omitted on serialization; a missing key
+///   deserializes as `None`.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use hash_mapper::prelude::*;
+///
+/// fn ser_tags(tags: &Vec<String>) -> Result<String, String> {
+///     Ok(tags.join(","))
+/// }
+/// fn de_tags(s: &str) -> Result<Vec<String>, String> {
+///     Ok(s.split(',').map(String::from).collect())
+/// }
+///
+/// #[derive(Debug, HashMapper)]
+/// struct Job {
+///     url: String,
+///     priority: u32,
+///     #[mapper(serialize = "ser_tags", deserialize = "de_tags")]
+///     tags: Vec<String>,
+///     /// Optional fields are skipped when `None`.
+///     assigned_to: Option<String>,
+/// }
+/// ```
 #[proc_macro_derive(HashMapper, attributes(mapper))]
 pub fn derive_hash_mapper(input: TokenStream) -> TokenStream {
+    // Parse the annotated struct
     let input = parse_macro_input!(input as DeriveInput);
     let struct_name = &input.ident;
 
+    // Extract named fields — enums and tuple structs are rejected
     let fields = match &input.data {
         Data::Struct(s) => match &s.fields {
             Fields::Named(f) => &f.named,
@@ -57,10 +105,9 @@ pub fn derive_hash_mapper(input: TokenStream) -> TokenStream {
         _ => panic!("HashMapper only supports structs"),
     };
 
+    // Pre-compute field metadata used across all generated impls
     let field_count = fields.len();
-
     let field_names: Vec<_> = fields.iter().map(|f| f.ident.as_ref().unwrap()).collect();
-
     let field_keys: Vec<_> = field_names.iter().map(|f| f.to_string()).collect();
 
     // ── Serialize: struct field → (key, redis::Value) pair ───────────────────
@@ -183,7 +230,8 @@ pub fn derive_hash_mapper(input: TokenStream) -> TokenStream {
         })
         .collect();
 
-    // Re-borrow so we can use the Vecs in multiple quote! blocks
+    // Re-borrow so the Vecs can be interpolated in multiple quote! blocks
+    // (quote! moves by default; referencing avoids that)
     let to_pairs_pushes = &to_pairs_pushes;
     let from_pairs_fields = &from_pairs_fields;
 

@@ -5,10 +5,14 @@ edition = "2024"
 
 [features]
 tokio = ["dep:tokio", "redis/tokio-comp"]
+smol = ["dep:smol", "dep:futures", "dep:mea", "redis/smol-comp"]
 
 [dependencies]
 anyhow = "1.0.102"
 tokio = { version = "1", optional = true, features = ["rt", "macros", "sync"] }
+smol = { version = "2", optional = true }
+mea = { version = "0.6", optional = true }
+futures = { version = "0.3", optional = true }
 # pulls in the proc-macro crate privately
 hash_mapper_derive = { path = "./hash_mapper_derive" }
 redis = { version = "1", features = ["streams"] }

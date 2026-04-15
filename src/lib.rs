@@ -12,8 +12,8 @@
 //!   semaphore-based concurrency control and graceful shutdown.
 //! - **Claimer** — reclaims stuck messages via `XAUTOCLAIM`, tracks delivery
 //!   counts, and routes exhausted messages to a dead-letter callback.
-//! - **Runtime-agnostic** — works with either `tokio` or `async-std`
-//!   (mutually exclusive feature flags).
+//! - **Tokio-powered** — uses `tokio::sync::Semaphore` and
+//!   `tokio::task::JoinSet` for concurrency control.
 //!
 //! ## Quick start
 //!
@@ -49,17 +49,13 @@
 //! handle.shutdown().await;
 //! ```
 //!
-//! ## Runtime selection
+//! ## Runtime
 //!
-//! Enable exactly one of:
-//! - `tokio` — uses `tokio::sync::Semaphore`, `tokio::task::JoinSet`
-//! - `async-std` — uses `mea::semaphore::Semaphore`, `FuturesUnordered`
+//! Requires the `tokio` feature flag to be enabled (uses `tokio::sync::Semaphore`,
+//! `tokio::task::JoinSet`).
 
-#[cfg(all(feature = "tokio", feature = "async-std"))]
-compile_error!("features `tokio` and `async-std` are mutually exclusive");
-
-#[cfg(not(any(feature = "tokio", feature = "async-std")))]
-compile_error!("either feature `tokio` or `async-std` must be enabled");
+#[cfg(not(feature = "tokio"))]
+compile_error!("the `tokio` feature must be enabled");
 
 pub use crate::hash_mappable::HashMappable;
 use anyhow::Error;

@@ -5,12 +5,13 @@ edition = "2024"
 
 [features]
 tokio = ["dep:tokio"]
-async-std = ["dep:async-std", "dep:futures"]
+async-std = ["dep:async-std", "dep:futures", "dep:mea"]
 
 [dependencies]
 anyhow = "1.0.102"
-tokio = { version = "1", optional = true, features = ["rt", "macros"] }
+tokio = { version = "1", optional = true, features = ["rt", "macros", "sync"] }
 async-std = { version = "1", optional = true }
+mea = { version = "0.6", optional = true }
 futures = { version = "0.3", optional = true }
 # pulls in the proc-macro crate privately
 hash_mapper_derive = { path = "./hash_mapper_derive" }

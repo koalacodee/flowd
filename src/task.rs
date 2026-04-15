@@ -11,9 +11,7 @@ pub struct Task<T: HashMappable> {
 
 pub struct Queue<I: HashMappable, E, F, Fut>
 where
-   // F is a function that takes &T and returns a Future
    F: Fn(&I) -> Fut,
-   // Fut is the actual Future being returned
    E: std::fmt::Display,
    Fut: Future<Output = Result<(), E>>,
 {
@@ -21,6 +19,7 @@ where
    consumer_group: String,
    consumer_id: String,
    block_timeout: usize,
+   max_concurrent_tasks: usize,
    worker: Arc<F>,
    _marker: PhantomData<(I, Fut, E)>,
    conn: MultiplexedConnection,
@@ -37,6 +36,7 @@ where
    pub consumer_group: String,
    pub consumer_id: String,
    pub block_timeout: usize,
+   pub max_concurrent_tasks: usize,
    pub worker: Arc<F>,
    pub conn: MultiplexedConnection,
    _marker: PhantomData<(I, Fut, E)>,
@@ -81,6 +81,7 @@ where
          consumer_group: builder.consumer_group,
          consumer_id: builder.consumer_id,
          block_timeout: builder.block_timeout,
+         max_concurrent_tasks: builder.max_concurrent_tasks,
          worker: builder.worker,
          conn: builder.conn,
          _marker: builder._marker,
@@ -134,11 +135,14 @@ where
       let consumer_group = Arc::new(self.consumer_group);
       let consumer_id = Arc::new(self.consumer_id);
       let block_timeout = self.block_timeout;
+      let max_concurrent_tasks = self.max_concurrent_tasks;
       let worker = self.worker;
       let conn = self.conn;
 
       #[cfg(feature = "tokio")]
       let join = {
+         let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent_tasks));
+
          tokio::spawn(async move {
             use redis::streams::{StreamReadOptions, StreamReadReply};
             use tokio::task::JoinSet;
@@ -150,45 +154,55 @@ where
                   break;
                }
 
+               let available = semaphore.available_permits();
+               if available == 0 {
+                  // All slots full — wait for at least one to free up
+                  let _permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+                  // just needed to wait, free the slot back
+                  continue;
+               }
+
                let mut read_conn = conn.clone();
                let opts = StreamReadOptions::default()
+                  .count(available)
                   .block(block_timeout)
                   .group(consumer_group.as_str(), consumer_id.as_str());
 
-               let reply: Option<StreamReadReply> =
-                  match read_conn.xread_options(&[name.as_str()], &[">"], &opts).await {
-                     Ok(r) => r,
-                     Err(e) => {
-                        eprintln!("failed to read from stream: {e}");
-                        continue;
-                     }
-                  };
+               let reply: Option<StreamReadReply> = match read_conn
+                  .xread_options(&[name.as_str()], &[">"], &opts)
+                  .await
+               {
+                  Ok(r) => r,
+                  Err(e) => {
+                     eprintln!("failed to read from stream: {e}");
+                     continue;
+                  }
+               };
 
                if let Some(reply) = reply {
                   for stream_key in reply.keys {
                      for message in stream_key.ids {
+                        let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
                         let mut conn = conn.clone();
                         let name = Arc::clone(&name);
                         let consumer_group = Arc::clone(&consumer_group);
                         let worker = Arc::clone(&worker);
 
                         set.spawn(async move {
+                           let _permit = permit; // dropped when task finishes
+
                            let pairs: Vec<(String, redis::Value)> =
                               message.map.into_iter().collect();
 
-                           let input =
-                              I::try_from_pairs(&pairs).map_err(|e| anyhow::anyhow!(e))?;
+                           let input = I::try_from_pairs(&pairs).map_err(|e| anyhow::anyhow!(e))?;
 
                            let handler_result = (worker)(&input).await;
 
                            match handler_result {
                               Ok(_) => {
-                                 conn.xack(
-                                    name.as_str(),
-                                    consumer_group.as_str(),
-                                    &[&message.id],
-                                 )
-                                 .await?;
+                                 conn
+                                    .xack(name.as_str(), consumer_group.as_str(), &[&message.id])
+                                    .await?;
                               }
                               Err(e) => {
                                  eprintln!("worker failed: {e}");
@@ -213,6 +227,8 @@ where
 
       #[cfg(feature = "async-std")]
       let join = {
+         let semaphore = Arc::new(mea::semaphore::Semaphore::new(max_concurrent_tasks));
+
          async_std::task::spawn(async move {
             use futures::stream::{FuturesUnordered, StreamExt};
             use redis::streams::{StreamReadOptions, StreamReadReply};
@@ -225,29 +241,43 @@ where
                   break;
                }
 
+               let available = semaphore.available_permits();
+               if available == 0 {
+                  // All slots full — wait for at least one to free up
+                  let _permit = semaphore.acquire(1).await;
+                  // just needed to wait, free the slot back
+                  continue;
+               }
+
                let mut read_conn = conn.clone();
                let opts = StreamReadOptions::default()
+                  .count(available)
                   .block(block_timeout)
                   .group(consumer_group.as_str(), consumer_id.as_str());
 
-               let reply: Option<StreamReadReply> =
-                  match read_conn.xread_options(&[name.as_str()], &[">"], &opts).await {
-                     Ok(r) => r,
-                     Err(e) => {
-                        eprintln!("failed to read from stream: {e}");
-                        continue;
-                     }
-                  };
+               let reply: Option<StreamReadReply> = match read_conn
+                  .xread_options(&[name.as_str()], &[">"], &opts)
+                  .await
+               {
+                  Ok(r) => r,
+                  Err(e) => {
+                     eprintln!("failed to read from stream: {e}");
+                     continue;
+                  }
+               };
 
                if let Some(reply) = reply {
                   for stream_key in reply.keys {
                      for message in stream_key.ids {
+                        let permit = Arc::clone(&semaphore).acquire_owned(1).await;
                         let mut conn = conn.clone();
                         let name = Arc::clone(&name);
                         let consumer_group = Arc::clone(&consumer_group);
                         let worker = Arc::clone(&worker);
 
                         tasks.push(async_std::task::spawn(async move {
+                           let _permit = permit; // dropped when task finishes
+
                            let pairs: Vec<(String, redis::Value)> =
                               message.map.into_iter().collect();
 
@@ -264,11 +294,7 @@ where
                            match handler_result {
                               Ok(_) => {
                                  if let Err(e) = conn
-                                    .xack(
-                                       name.as_str(),
-                                       consumer_group.as_str(),
-                                       &[&message.id],
-                                    )
+                                    .xack(name.as_str(), consumer_group.as_str(), &[&message.id])
                                     .await
                                  {
                                     eprintln!("failed to ack message: {e}");

@@ -2,10 +2,11 @@ use super::helpers::{ack, parse_message, process_and_ack};
 use super::types::{Queue, QueueBuilder, QueueHandle, Task};
 use crate::HashMappable;
 use crate::runtime::{Runtime, SelectedRuntime};
+use crate::task::Claimer;
 use anyhow::Error;
 use redis::AsyncTypedCommands;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 impl QueueHandle {
    /// Signal both loops to stop reading new messages, then wait
@@ -43,7 +44,17 @@ where
          block_timeout: builder.block_timeout,
          max_concurrent_tasks: builder.max_concurrent_tasks,
          worker: builder.worker,
-         claimer: builder.claimer,
+         claimer: match builder.claimer {
+            Some(c) => Some(Claimer {
+               min_idle_time: c.min_idle_time,
+               block_timeout: c.block_timeout,
+               max_concurrent_tasks: c.max_concurrent_tasks,
+               max_retries: c.max_retries,
+               dlq_worker: c.dlq_worker,
+               _marker: Default::default(),
+            }),
+            None => None,
+         },
          conn: builder.conn,
          _marker: builder._marker,
       }
@@ -188,8 +199,7 @@ where
                      for message in stream_key.ids {
                         // Acquire a semaphore permit before spawning — this
                         // reserves a concurrency slot for the task
-                        let permit =
-                           SelectedRuntime::acquire_permit(Arc::clone(&semaphore)).await;
+                        let permit = SelectedRuntime::acquire_permit(Arc::clone(&semaphore)).await;
                         let mut conn = conn.clone();
                         let name = Arc::clone(&name);
                         let consumer_group = Arc::clone(&consumer_group);
@@ -299,8 +309,7 @@ where
 
                // Step 4: XPENDING — fetch delivery counts for the claimed
                // range so we know how many times each message was attempted
-               let claimed_ids: Vec<&str> =
-                  reply.claimed.iter().map(|m| m.id.as_str()).collect();
+               let claimed_ids: Vec<&str> = reply.claimed.iter().map(|m| m.id.as_str()).collect();
                let first_id = claimed_ids.first().unwrap().to_string();
                let last_id = claimed_ids.last().unwrap().to_string();
 
@@ -331,11 +340,12 @@ where
 
                // Step 5: Dispatch each claimed message as a concurrent task
                for message in reply.claimed {
-                  let times_delivered =
-                     delivery_counts.get(message.id.as_str()).copied().unwrap_or(1);
+                  let times_delivered = delivery_counts
+                     .get(message.id.as_str())
+                     .copied()
+                     .unwrap_or(1);
 
-                  let permit =
-                     SelectedRuntime::acquire_permit(Arc::clone(&semaphore)).await;
+                  let permit = SelectedRuntime::acquire_permit(Arc::clone(&semaphore)).await;
                   let mut conn = conn.clone();
                   let name = Arc::clone(&name);
                   let consumer_group = Arc::clone(&consumer_group);
@@ -359,8 +369,13 @@ where
                            }
                         }
                         // XACK to remove from PEL regardless of DLQ outcome
-                        ack(&mut conn, name.as_str(), consumer_group.as_str(), &message.id)
-                           .await;
+                        ack(
+                           &mut conn,
+                           name.as_str(),
+                           consumer_group.as_str(),
+                           &message.id,
+                        )
+                        .await;
                         return;
                      }
 

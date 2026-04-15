@@ -29,19 +29,19 @@ where
 {
    /// Minimum idle time (ms) a message must have been pending before it can
    /// be claimed. Maps to the `min-idle-time` argument of `XAUTOCLAIM`.
-   pub min_idle_time: usize,
+   pub(super) min_idle_time: usize,
    /// How long (ms) the claimer sleeps when there are no claimable messages.
-   pub block_timeout: usize,
+   pub(super) block_timeout: usize,
    /// Maximum number of messages the claimer processes concurrently,
    /// controlled via a semaphore.
-   pub max_concurrent_tasks: usize,
+   pub(super) max_concurrent_tasks: usize,
    /// After this many deliveries a message is considered dead and routed to
    /// the DLQ callback instead of retried.
-   pub max_retries: usize,
+   pub(super) max_retries: usize,
    /// Optional dead-letter callback. Called with `(&payload, delivery_count)`
    /// for messages that exceed `max_retries`. If `None`, exhausted messages
    /// are silently acknowledged.
-   pub dlq_worker: Option<Arc<DF>>,
+   pub(super) dlq_worker: Option<Arc<DF>>,
    pub(super) _marker: PhantomData<(I, DE, DFut)>,
 }
 
@@ -131,7 +131,7 @@ where
    pub worker: Arc<F>,
    /// Optional [`Claimer`] configuration for reclaiming stuck messages.
    /// Pass `None` to disable the claimer loop.
-   pub claimer: Option<Claimer<I, DE, DF, DFut>>,
+   pub claimer: Option<ClaimerBuilder<I, DE, DF, DFut>>,
    /// A cloneable Redis connection. Each spawned task clones this.
    pub conn: MultiplexedConnection,
    pub(super) _marker: PhantomData<(I, Fut, E)>,

@@ -1,91 +1,11 @@
+use super::helpers::{ack, parse_message, process_and_ack};
+use super::types::{Queue, QueueBuilder, QueueHandle, Task};
 use crate::HashMappable;
 use crate::runtime::{Runtime, SelectedRuntime};
 use anyhow::Error;
-use redis::{AsyncTypedCommands, aio::MultiplexedConnection};
+use redis::AsyncTypedCommands;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::{marker::PhantomData, sync::Arc};
-
-pub struct Task<T: HashMappable> {
-   pub id: String,
-   pub payload: T,
-}
-
-pub struct Claimer<I: HashMappable, DE, DF, DFut>
-where
-   DF: Fn(&I, usize) -> DFut,
-   DE: std::fmt::Display,
-   DFut: Future<Output = Result<(), DE>>,
-{
-   pub min_idle_time: usize,
-   pub block_timeout: usize,
-   pub max_concurrent_tasks: usize,
-   pub max_retries: usize,
-   pub dlq_worker: Option<Arc<DF>>,
-   _marker: PhantomData<(I, DE, DFut)>,
-}
-
-pub struct ClaimerBuilder<I: HashMappable, DE, DF, DFut>
-where
-   DF: Fn(&I, usize) -> DFut + 'static + Send + Sync,
-   DE: std::fmt::Display + Send + 'static,
-   DFut: Future<Output = Result<(), DE>> + Send,
-{
-   pub min_idle_time: usize,
-   pub block_timeout: usize,
-   pub max_concurrent_tasks: usize,
-   pub max_retries: usize,
-   pub dlq_worker: Option<Arc<DF>>,
-   _marker: PhantomData<(I, DE, DFut)>,
-}
-
-pub struct Queue<I: HashMappable, E, F, Fut, DE, DF, DFut>
-where
-   F: Fn(&I) -> Fut,
-   E: std::fmt::Display,
-   Fut: Future<Output = Result<(), E>>,
-   DF: Fn(&I, usize) -> DFut,
-   DE: std::fmt::Display,
-   DFut: Future<Output = Result<(), DE>>,
-{
-   pub name: String,
-   consumer_group: String,
-   consumer_id: String,
-   block_timeout: usize,
-   max_concurrent_tasks: usize,
-   worker: Arc<F>,
-   claimer: Option<Claimer<I, DE, DF, DFut>>,
-   _marker: PhantomData<(I, Fut, E)>,
-   conn: MultiplexedConnection,
-}
-
-pub struct QueueBuilder<I, E, F, Fut, DE, DF, DFut>
-where
-   I: HashMappable,
-   F: Fn(&I) -> Fut + 'static + Send + Sync,
-   E: std::fmt::Display + Send + 'static,
-   Fut: Future<Output = Result<(), E>> + Send,
-   DF: Fn(&I, usize) -> DFut + 'static + Send + Sync,
-   DE: std::fmt::Display + Send + 'static,
-   DFut: Future<Output = Result<(), DE>> + Send,
-{
-   pub name: String,
-   pub consumer_group: String,
-   pub consumer_id: String,
-   pub block_timeout: usize,
-   pub max_concurrent_tasks: usize,
-   pub worker: Arc<F>,
-   pub claimer: Option<Claimer<I, DE, DF, DFut>>,
-   pub conn: MultiplexedConnection,
-   _marker: PhantomData<(I, Fut, E)>,
-}
-
-/// Handle returned by `Queue::run()`. Call `.shutdown()` to gracefully stop
-/// the consumer and claimer loops, waiting for all in-flight tasks to finish.
-pub struct QueueHandle {
-   shutdown: Arc<AtomicBool>,
-   main_join: <SelectedRuntime as Runtime>::JoinHandle,
-   claimer_join: Option<<SelectedRuntime as Runtime>::JoinHandle>,
-}
+use std::sync::Arc;
 
 impl QueueHandle {
    /// Signal both loops to stop reading new messages, then wait
@@ -101,7 +21,7 @@ impl QueueHandle {
 
 impl<I, E, F, Fut, DE, DF, DFut> Queue<I, E, F, Fut, DE, DF, DFut>
 where
-   I: HashMappable + Send + 'static,
+   I: HashMappable + Send + Sync + 'static,
    F: Fn(&I) -> Fut + 'static + Send + Sync,
    E: std::fmt::Display + Send + 'static,
    Fut: Future<Output = Result<(), E>> + Send,
@@ -227,37 +147,18 @@ where
 
                         SelectedRuntime::spawn_task(&mut set, async move {
                            let _permit = permit;
-
-                           let pairs: Vec<(String, redis::Value)> =
-                              message.map.into_iter().collect();
-
-                           let input = match I::try_from_pairs(&pairs) {
-                              Ok(v) => v,
-                              Err(e) => {
-                                 eprintln!("failed to parse task: {e}");
-                                 return;
-                              }
+                           let Some(input) = parse_message::<I>(message.map) else {
+                              return;
                            };
-
-                           let handler_result = (worker)(&input).await;
-
-                           match handler_result {
-                              Ok(_) => {
-                                 if let Err(e) = conn
-                                    .xack(
-                                       name.as_str(),
-                                       consumer_group.as_str(),
-                                       &[&message.id],
-                                    )
-                                    .await
-                                 {
-                                    eprintln!("failed to ack message: {e}");
-                                 }
-                              }
-                              Err(e) => {
-                                 eprintln!("worker failed: {e}");
-                              }
-                           }
+                           process_and_ack(
+                              &input,
+                              worker.as_ref(),
+                              &mut conn,
+                              name.as_str(),
+                              consumer_group.as_str(),
+                              &message.id,
+                           )
+                           .await;
                         });
                      }
                   }
@@ -378,59 +279,30 @@ where
 
                   SelectedRuntime::spawn_task(&mut set, async move {
                      let _permit = permit;
-
-                     let pairs: Vec<(String, redis::Value)> =
-                        message.map.into_iter().collect();
-
-                     let input = match I::try_from_pairs(&pairs) {
-                        Ok(v) => v,
-                        Err(e) => {
-                           eprintln!("failed to parse task: {e}");
-                           return;
-                        }
+                     let Some(input) = parse_message::<I>(message.map) else {
+                        return;
                      };
 
                      if times_delivered > max_retries {
-                        // Max retries exceeded — send to DLQ if configured
                         if let Some(dlq) = &dlq_worker {
                            if let Err(e) = (dlq)(&input, times_delivered).await {
                               eprintln!("dlq worker failed: {e}");
                            }
                         }
-                        // ACK to remove from PEL regardless
-                        if let Err(e) = conn
-                           .xack(
-                              name.as_str(),
-                              consumer_group.as_str(),
-                              &[&message.id],
-                           )
-                           .await
-                        {
-                           eprintln!("failed to ack dead-lettered message: {e}");
-                        }
+                        ack(&mut conn, name.as_str(), consumer_group.as_str(), &message.id)
+                           .await;
                         return;
                      }
 
-                     // Normal retry
-                     let handler_result = (worker)(&input).await;
-
-                     match handler_result {
-                        Ok(_) => {
-                           if let Err(e) = conn
-                              .xack(
-                                 name.as_str(),
-                                 consumer_group.as_str(),
-                                 &[&message.id],
-                              )
-                              .await
-                           {
-                              eprintln!("failed to ack message: {e}");
-                           }
-                        }
-                        Err(e) => {
-                           eprintln!("worker failed (retry {}): {e}", times_delivered);
-                        }
-                     }
+                     process_and_ack(
+                        &input,
+                        worker.as_ref(),
+                        &mut conn,
+                        name.as_str(),
+                        consumer_group.as_str(),
+                        &message.id,
+                     )
+                     .await;
                   });
                }
             }

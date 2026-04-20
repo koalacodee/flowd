@@ -19,34 +19,38 @@
 //!
 //! ```rust,ignore
 //! use flowd::prelude::*;
-//! use flowd::task::{Task, Queue, QueueBuilder};
+//! use flowd::task::{Queue, QueueBuilder};
 //!
 //! #[derive(Debug, Job)]
 //! struct Email {
-//!     url: String,
-//!     retries: u32,
+//!     to: String,
+//!     subject: String,
 //! }
 //!
-//! // Build and run a consumer queue
-//! let queue = Queue::new(QueueBuilder {
-//!     name: "jobs".into(),
-//!     consumer_group: "workers".into(),
-//!     consumer_id: "worker-1".into(),
-//!     block_timeout: 5000,
-//!     max_concurrent_tasks: 10,
-//!     worker: Arc::new(|job: &Email| async move {
-//!         println!("processing {}", job.url);
-//!         Ok::<(), String>(())
-//!     }),
-//!     claimer: None,
-//!     conn,
-//!     _marker: Default::default(),
-//! });
+//! # async fn run() -> anyhow::Result<()> {
+//! let client    = redis::Client::open("redis://127.0.0.1:6379")?;
+//! let conn      = client.get_multiplexed_async_connection().await?;
+//! let read_conn = client.get_multiplexed_async_connection().await?;
+//!
+//! let queue = Queue::new(
+//!     QueueBuilder::new(
+//!         "emails", "senders", "sender-1",
+//!         |email: Email| async move {
+//!             println!("sending to {}", email.to);
+//!             Ok::<(), String>(())
+//!         },
+//!         conn,
+//!         read_conn,
+//!     )
+//!     .block_timeout(5000)
+//!     .max_concurrent_tasks(10),
+//! );
 //!
 //! queue.init(None).await?;
 //! let handle = queue.run();
 //! // ... later ...
 //! handle.shutdown().await;
+//! # Ok(()) }
 //! ```
 //!
 //! ## Runtime selection

@@ -1,12 +1,20 @@
 [package]
-name    = "flowd_derive"
+name = "flowd_derive"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Derive macro for flowd — generates struct ↔ redis::Value mapping. Not intended for direct use; re-exported by `flowd`."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/koalacodee/flowd"
+documentation = "https://docs.rs/flowd"
+readme = "README.md"
+keywords = ["redis", "derive", "proc-macro", "flowd"]
+categories = ["asynchronous", "rust-patterns"]
 
 [lib]
 proc-macro = true
 
 [dependencies]
-syn          = { version = "2", features = ["full"] }
-quote        = "1"
-proc-macro2  = "1"
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"

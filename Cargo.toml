@@ -2,6 +2,15 @@
 name = "flowd"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Redis Streams-backed task queue with a derive macro for automatic struct ↔ redis::Value mapping. Supports tokio and smol."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/koalacodee/flowd"
+homepage = "https://github.com/koalacodee/flowd"
+documentation = "https://docs.rs/flowd"
+readme = "README.md"
+keywords = ["redis", "queue", "streams", "task-queue", "async"]
+categories = ["asynchronous", "database"]
 
 [features]
 tokio = ["dep:tokio", "redis/tokio-comp"]
@@ -13,6 +22,11 @@ tokio = { version = "1", optional = true, features = ["rt", "macros", "sync"] }
 smol = { version = "2", optional = true }
 mea = { version = "0.6", optional = true }
 futures = { version = "0.3", optional = true }
-# pulls in the proc-macro crate privately
-flowd_derive = { path = "./flowd_derive" }
+# pulls in the proc-macro crate privately — `path` is used by local dev,
+# `version` is required so `cargo publish` resolves against crates.io
+flowd_derive = { path = "./flowd_derive", version = "0.1.0" }
 redis = { version = "1", features = ["streams"] }
+
+[package.metadata.docs.rs]
+features = ["tokio"]
+rustdoc-args = ["--cfg", "docsrs"]

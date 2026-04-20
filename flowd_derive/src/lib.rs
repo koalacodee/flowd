@@ -90,6 +90,7 @@ fn parse_mapper_attr(attrs: &[Attribute]) -> FieldMapper {
 ///     assigned_to: Option<String>,
 /// }
 /// ```
+#[doc(hidden)]
 #[proc_macro_derive(Job, attributes(mapper))]
 pub fn derive_job(input: TokenStream) -> TokenStream {
     // Parse the annotated struct

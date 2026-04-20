@@ -174,7 +174,9 @@ pub fn derive_job(input: TokenStream) -> TokenStream {
             let ty = &field.ty;
             let mapper = parse_mapper_attr(&field.attrs);
 
-            let lookup = quote! { map.get(#key) };
+            // .copied() turns Option<&&Value> into Option<&Value> so it can
+            // be passed to from_redis_value (which takes &Value)
+            let lookup = quote! { map.get(#key).copied() };
 
             if let Some(de_fn) = mapper.deserialize {
                 if is_option(ty) {
@@ -182,7 +184,7 @@ pub fn derive_job(input: TokenStream) -> TokenStream {
                     quote! {
                         #name: match #lookup {
                             Some(v) => {
-                                let s: String = flowd::redis::from_redis_value(v)
+                                let s: String = flowd::redis::from_redis_value_ref(v)
                                     .map_err(|e| format!("deserialize error on `{}`: {}", #key, e))?;
                                 if s.is_empty() {
                                     None
@@ -200,7 +202,7 @@ pub fn derive_job(input: TokenStream) -> TokenStream {
                         #name: {
                             let v = #lookup
                                 .ok_or_else(|| format!("missing field: `{}`", #key))?;
-                            let s: String = flowd::redis::from_redis_value(v)
+                            let s: String = flowd::redis::from_redis_value_ref(v)
                                 .map_err(|e| format!("deserialize error on `{}`: {}", #key, e))?;
                             #de_fn(&s)
                                 .map_err(|e| format!("deserialize error on `{}`: {}", #key, e))?
@@ -213,7 +215,7 @@ pub fn derive_job(input: TokenStream) -> TokenStream {
                 quote! {
                     #name: match #lookup {
                         Some(v) => Some(
-                            flowd::redis::from_redis_value::<#inner>(v)
+                            flowd::redis::from_redis_value_ref::<#inner>(v)
                                 .map_err(|e| format!("parse error on `{}`: {}", #key, e))?
                         ),
                         None => None,
@@ -222,7 +224,7 @@ pub fn derive_job(input: TokenStream) -> TokenStream {
             } else {
                 // Default — requires field type to implement FromRedisValue
                 quote! {
-                    #name: flowd::redis::from_redis_value::<#ty>(
+                    #name: flowd::redis::from_redis_value_ref::<#ty>(
                         #lookup.ok_or_else(|| format!("missing field: `{}`", #key))?
                     ).map_err(|e| format!("failed to parse field `{}`: {}", #key, e))?,
                 }

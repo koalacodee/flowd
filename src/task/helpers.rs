@@ -34,14 +34,14 @@ pub(super) async fn ack(
 // On worker failure the message is left unacknowledged in the PEL so
 // the claimer can retry it later.
 pub(super) async fn process_and_ack<I, E, F, Fut>(
-   input: &I,
+   input: I,
    worker: &F,
    conn: &mut MultiplexedConnection,
    stream_name: &str,
    consumer_group: &str,
    message_id: &str,
 ) where
-   F: Fn(&I) -> Fut,
+   F: Fn(I) -> Fut,
    E: std::fmt::Display,
    Fut: Future<Output = Result<(), E>>,
 {

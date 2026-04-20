@@ -1,12 +1,198 @@
 use super::helpers::{ack, parse_message, process_and_ack};
-use super::types::{Queue, QueueBuilder, QueueHandle, Task};
+use super::types::{ClaimerBuilder, Queue, QueueBuilder, QueueHandle, Task};
 use crate::Job;
 use crate::runtime::{Runtime, SelectedRuntime};
 use crate::task::Claimer;
 use anyhow::Error;
 use redis::AsyncTypedCommands;
+use redis::aio::MultiplexedConnection;
+use std::future::Ready;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+// ── Default types for a QueueBuilder with no claimer ─────────────────────────
+//
+// When no claimer is configured, the `DE/DF/DFut` generics on QueueBuilder
+// are unused but still need concrete types. These aliases fill them with
+// no-op placeholders so `QueueBuilder::new()` has a single, inferrable
+// return type.
+
+/// Placeholder DLQ error type used when no claimer is configured.
+pub type NoDlqError = String;
+/// Placeholder DLQ future type used when no claimer is configured.
+pub type NoDlqFut = Ready<Result<(), NoDlqError>>;
+/// Placeholder DLQ function pointer used when no claimer is configured.
+pub type NoDlqFn<I> = fn(I, usize) -> NoDlqFut;
+
+// ── QueueBuilder builder methods ─────────────────────────────────────────────
+
+impl<I, E, F, Fut> QueueBuilder<I, E, F, Fut, NoDlqError, NoDlqFn<I>, NoDlqFut>
+where
+   I: Job + Send + Sync + 'static,
+   F: Fn(I) -> Fut + 'static + Send + Sync,
+   E: std::fmt::Display + Send + 'static,
+   Fut: Future<Output = Result<(), E>> + Send,
+{
+   /// Construct a new `QueueBuilder` with sensible defaults.
+   ///
+   /// Defaults: `block_timeout = 5000`, `max_concurrent_tasks = 1`, no claimer.
+   /// Override via chained setters: [`block_timeout()`](Self::block_timeout),
+   /// [`max_concurrent_tasks()`](Self::max_concurrent_tasks),
+   /// [`claimer()`](Self::claimer).
+   pub fn new(
+      name: impl Into<String>,
+      consumer_group: impl Into<String>,
+      consumer_id: impl Into<String>,
+      worker: F,
+      conn: MultiplexedConnection,
+   ) -> Self {
+      Self {
+         name: name.into(),
+         consumer_group: consumer_group.into(),
+         consumer_id: consumer_id.into(),
+         block_timeout: 5000,
+         max_concurrent_tasks: 1,
+         worker: Arc::new(worker),
+         claimer: None,
+         conn,
+         _marker: PhantomData,
+      }
+   }
+}
+
+impl<I, E, F, Fut, DE, DF, DFut> QueueBuilder<I, E, F, Fut, DE, DF, DFut>
+where
+   I: Job + Send + Sync + 'static,
+   F: Fn(I) -> Fut + 'static + Send + Sync,
+   E: std::fmt::Display + Send + 'static,
+   Fut: Future<Output = Result<(), E>> + Send,
+   DF: Fn(I, usize) -> DFut + 'static + Send + Sync,
+   DE: std::fmt::Display + Send + 'static,
+   DFut: Future<Output = Result<(), DE>> + Send,
+{
+   /// How long (ms) `XREADGROUP` blocks waiting for new messages.
+   pub fn block_timeout(mut self, ms: usize) -> Self {
+      self.block_timeout = ms;
+      self
+   }
+
+   /// Maximum messages processed concurrently (semaphore-enforced).
+   /// Also caps the `COUNT` argument of `XREADGROUP`.
+   pub fn max_concurrent_tasks(mut self, n: usize) -> Self {
+      self.max_concurrent_tasks = n;
+      self
+   }
+
+   /// Attach a [`ClaimerBuilder`] for reclaiming stuck messages.
+   ///
+   /// Changes the builder's generic parameters to match the claimer's DLQ
+   /// types, so this must be called before finalizing the builder.
+   pub fn claimer<DE2, DF2, DFut2>(
+      self,
+      claimer: ClaimerBuilder<I, DE2, DF2, DFut2>,
+   ) -> QueueBuilder<I, E, F, Fut, DE2, DF2, DFut2>
+   where
+      DF2: Fn(I, usize) -> DFut2 + 'static + Send + Sync,
+      DE2: std::fmt::Display + Send + 'static,
+      DFut2: Future<Output = Result<(), DE2>> + Send,
+   {
+      QueueBuilder {
+         name: self.name,
+         consumer_group: self.consumer_group,
+         consumer_id: self.consumer_id,
+         block_timeout: self.block_timeout,
+         max_concurrent_tasks: self.max_concurrent_tasks,
+         worker: self.worker,
+         claimer: Some(claimer),
+         conn: self.conn,
+         _marker: PhantomData,
+      }
+   }
+}
+
+// ── ClaimerBuilder builder methods ───────────────────────────────────────────
+
+impl<I> ClaimerBuilder<I, NoDlqError, NoDlqFn<I>, NoDlqFut>
+where
+   I: Job,
+{
+   /// Construct a new `ClaimerBuilder` with sensible defaults.
+   ///
+   /// Defaults: `min_idle_time = 30_000`, `block_timeout = 10_000`,
+   /// `max_concurrent_tasks = 1`, `max_retries = 3`, no DLQ worker.
+   pub fn new() -> Self {
+      Self {
+         min_idle_time: 30_000,
+         block_timeout: 10_000,
+         max_concurrent_tasks: 1,
+         max_retries: 3,
+         dlq_worker: None,
+         _marker: PhantomData,
+      }
+   }
+}
+
+impl<I> Default for ClaimerBuilder<I, NoDlqError, NoDlqFn<I>, NoDlqFut>
+where
+   I: Job,
+{
+   fn default() -> Self {
+      Self::new()
+   }
+}
+
+impl<I, DE, DF, DFut> ClaimerBuilder<I, DE, DF, DFut>
+where
+   I: Job,
+   DF: Fn(I, usize) -> DFut + 'static + Send + Sync,
+   DE: std::fmt::Display + Send + 'static,
+   DFut: Future<Output = Result<(), DE>> + Send,
+{
+   /// Minimum idle time (ms) before a message is eligible for reclaiming.
+   pub fn min_idle_time(mut self, ms: usize) -> Self {
+      self.min_idle_time = ms;
+      self
+   }
+
+   /// How long (ms) the claimer sleeps when there are no claimable messages.
+   pub fn block_timeout(mut self, ms: usize) -> Self {
+      self.block_timeout = ms;
+      self
+   }
+
+   /// Maximum messages reclaimed concurrently.
+   pub fn max_concurrent_tasks(mut self, n: usize) -> Self {
+      self.max_concurrent_tasks = n;
+      self
+   }
+
+   /// Delivery attempts before a message is sent to the DLQ.
+   pub fn max_retries(mut self, n: usize) -> Self {
+      self.max_retries = n;
+      self
+   }
+
+   /// Attach a dead-letter callback.
+   ///
+   /// Changes the builder's generic parameters to match the worker's
+   /// signature.
+   pub fn dlq_worker<DE2, DF2, DFut2>(self, worker: DF2) -> ClaimerBuilder<I, DE2, DF2, DFut2>
+   where
+      DF2: Fn(I, usize) -> DFut2 + 'static + Send + Sync,
+      DE2: std::fmt::Display + Send + 'static,
+      DFut2: Future<Output = Result<(), DE2>> + Send,
+   {
+      ClaimerBuilder {
+         min_idle_time: self.min_idle_time,
+         block_timeout: self.block_timeout,
+         max_concurrent_tasks: self.max_concurrent_tasks,
+         max_retries: self.max_retries,
+         dlq_worker: Some(Arc::new(worker)),
+         _marker: PhantomData,
+      }
+   }
+}
 
 impl QueueHandle {
    /// Signal both loops to stop reading new messages, then wait
@@ -28,10 +214,10 @@ impl QueueHandle {
 impl<I, E, F, Fut, DE, DF, DFut> Queue<I, E, F, Fut, DE, DF, DFut>
 where
    I: Job + Send + Sync + 'static,
-   F: Fn(&I) -> Fut + 'static + Send + Sync,
+   F: Fn(I) -> Fut + 'static + Send + Sync,
    E: std::fmt::Display + Send + 'static,
    Fut: Future<Output = Result<(), E>> + Send,
-   DF: Fn(&I, usize) -> DFut + 'static + Send + Sync,
+   DF: Fn(I, usize) -> DFut + 'static + Send + Sync,
    DE: std::fmt::Display + Send + 'static,
    DFut: Future<Output = Result<(), DE>> + Send,
 {
@@ -258,7 +444,7 @@ where
 
                            // Run the worker and XACK on success
                            process_and_ack(
-                              &input,
+                              input,
                               worker.as_ref(),
                               &mut conn,
                               name.as_str(),
@@ -406,7 +592,7 @@ where
                      if times_delivered > max_retries {
                         // Invoke the DLQ callback if configured
                         if let Some(dlq) = &dlq_worker {
-                           if let Err(e) = (dlq)(&input, times_delivered).await {
+                           if let Err(e) = (dlq)(input, times_delivered).await {
                               eprintln!("dlq worker failed: {e}");
                            }
                         }
@@ -423,7 +609,7 @@ where
 
                      // Normal retry path: run the worker, XACK on success
                      process_and_ack(
-                        &input,
+                        input,
                         worker.as_ref(),
                         &mut conn,
                         name.as_str(),

@@ -23,7 +23,7 @@ pub struct Task<T: Job> {
 /// then acknowledged to remove them from the PEL.
 pub struct Claimer<I: Job, DE, DF, DFut>
 where
-   DF: Fn(&I, usize) -> DFut,
+   DF: Fn(I, usize) -> DFut,
    DE: std::fmt::Display,
    DFut: Future<Output = Result<(), DE>>,
 {
@@ -45,19 +45,29 @@ where
    pub(super) _marker: PhantomData<(I, DE, DFut)>,
 }
 
-/// Builder for constructing a [`Claimer`]. Fields mirror [`Claimer`] with
-/// additional `Send + Sync + 'static` bounds required for spawning.
+/// Builder for constructing a [`Claimer`].
+///
+/// Construct via [`ClaimerBuilder::new()`] and configure with chained setters:
+///
+/// ```rust,ignore
+/// let claimer = ClaimerBuilder::new()
+///     .min_idle_time(30_000)
+///     .max_retries(3)
+///     .dlq_worker(|payload: &Email, attempts| async move {
+///         Ok::<(), String>(())
+///     });
+/// ```
 pub struct ClaimerBuilder<I: Job, DE, DF, DFut>
 where
-   DF: Fn(&I, usize) -> DFut + 'static + Send + Sync,
+   DF: Fn(I, usize) -> DFut + 'static + Send + Sync,
    DE: std::fmt::Display + Send + 'static,
    DFut: Future<Output = Result<(), DE>> + Send,
 {
-   pub min_idle_time: usize,
-   pub block_timeout: usize,
-   pub max_concurrent_tasks: usize,
-   pub max_retries: usize,
-   pub dlq_worker: Option<Arc<DF>>,
+   pub(super) min_idle_time: usize,
+   pub(super) block_timeout: usize,
+   pub(super) max_concurrent_tasks: usize,
+   pub(super) max_retries: usize,
+   pub(super) dlq_worker: Option<Arc<DF>>,
    pub(super) _marker: PhantomData<(I, DE, DFut)>,
 }
 
@@ -83,10 +93,10 @@ where
 /// | `DFut`| Future returned by the DLQ worker |
 pub struct Queue<I: Job, E, F, Fut, DE, DF, DFut>
 where
-   F: Fn(&I) -> Fut,
+   F: Fn(I) -> Fut,
    E: std::fmt::Display,
    Fut: Future<Output = Result<(), E>>,
-   DF: Fn(&I, usize) -> DFut,
+   DF: Fn(I, usize) -> DFut,
    DE: std::fmt::Display,
    DFut: Future<Output = Result<(), DE>>,
 {
@@ -104,36 +114,32 @@ where
 
 /// Builder struct for constructing a [`Queue`].
 ///
-/// All fields are public so you can construct it directly with struct syntax.
-/// Pass it to [`Queue::new()`] to create the queue.
+/// Construct via [`QueueBuilder::new()`] and configure with chained setters:
+///
+/// ```rust,ignore
+/// let builder = QueueBuilder::new("emails", "senders", "sender-1", worker, conn)
+///     .block_timeout(5000)
+///     .max_concurrent_tasks(10)
+///     .claimer(claimer_builder);
+/// ```
 pub struct QueueBuilder<I, E, F, Fut, DE, DF, DFut>
 where
    I: Job,
-   F: Fn(&I) -> Fut + 'static + Send + Sync,
+   F: Fn(I) -> Fut + 'static + Send + Sync,
    E: std::fmt::Display + Send + 'static,
    Fut: Future<Output = Result<(), E>> + Send,
-   DF: Fn(&I, usize) -> DFut + 'static + Send + Sync,
+   DF: Fn(I, usize) -> DFut + 'static + Send + Sync,
    DE: std::fmt::Display + Send + 'static,
    DFut: Future<Output = Result<(), DE>> + Send,
 {
-   /// Name of the Redis Stream key.
-   pub name: String,
-   /// Consumer group name (created by [`Queue::init()`] if it doesn't exist).
-   pub consumer_group: String,
-   /// Unique consumer ID within the group.
-   pub consumer_id: String,
-   /// How long (ms) `XREADGROUP` blocks waiting for new messages.
-   pub block_timeout: usize,
-   /// Maximum number of messages processed concurrently, enforced by a
-   /// semaphore. Also caps the `COUNT` argument of `XREADGROUP`.
-   pub max_concurrent_tasks: usize,
-   /// The async worker closure invoked for each message.
-   pub worker: Arc<F>,
-   /// Optional [`Claimer`] configuration for reclaiming stuck messages.
-   /// Pass `None` to disable the claimer loop.
-   pub claimer: Option<ClaimerBuilder<I, DE, DF, DFut>>,
-   /// A cloneable Redis connection. Each spawned task clones this.
-   pub conn: MultiplexedConnection,
+   pub(super) name: String,
+   pub(super) consumer_group: String,
+   pub(super) consumer_id: String,
+   pub(super) block_timeout: usize,
+   pub(super) max_concurrent_tasks: usize,
+   pub(super) worker: Arc<F>,
+   pub(super) claimer: Option<ClaimerBuilder<I, DE, DF, DFut>>,
+   pub(super) conn: MultiplexedConnection,
    pub(super) _marker: PhantomData<(I, Fut, E)>,
 }
 

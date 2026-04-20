@@ -66,4 +66,5 @@ mod helpers;
 mod queue;
 mod types;
 
+pub use queue::{NoDlqError, NoDlqFn, NoDlqFut};
 pub use types::{Claimer, ClaimerBuilder, Queue, QueueBuilder, QueueHandle, Task};

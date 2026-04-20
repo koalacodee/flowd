@@ -109,7 +109,13 @@ where
    pub(super) worker: Arc<F>,
    pub(super) claimer: Option<Claimer<I, DE, DF, DFut>>,
    pub(super) _marker: PhantomData<(I, Fut, E)>,
+   /// Shared multiplexed connection used for non-blocking ops (XACK, XADD,
+   /// XAUTOCLAIM, XPENDING).
    pub(super) conn: MultiplexedConnection,
+   /// Dedicated connection reserved for the blocking `XREADGROUP` call.
+   /// A blocking command stalls the multiplexer for every caller sharing
+   /// the underlying socket, so the reader must not share with `conn`.
+   pub(super) read_conn: MultiplexedConnection,
 }
 
 /// Builder struct for constructing a [`Queue`].
@@ -139,7 +145,11 @@ where
    pub(super) max_concurrent_tasks: usize,
    pub(super) worker: Arc<F>,
    pub(super) claimer: Option<ClaimerBuilder<I, DE, DF, DFut>>,
+   /// Shared multiplexed connection used for non-blocking ops (XACK, XADD,
+   /// XAUTOCLAIM, XPENDING).
    pub(super) conn: MultiplexedConnection,
+   /// Dedicated connection reserved for the blocking `XREADGROUP` call.
+   pub(super) read_conn: MultiplexedConnection,
    pub(super) _marker: PhantomData<(I, Fut, E)>,
 }
 

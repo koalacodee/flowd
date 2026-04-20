@@ -40,12 +40,35 @@ where
    /// Override via chained setters: [`block_timeout()`](Self::block_timeout),
    /// [`max_concurrent_tasks()`](Self::max_concurrent_tasks),
    /// [`claimer()`](Self::claimer).
+   ///
+   /// # Connections
+   ///
+   /// - `conn` is used for all non-blocking operations (XACK, XADD,
+   ///   XAUTOCLAIM, XPENDING) and may be shared with other callers.
+   /// - `read_conn` is used exclusively for the blocking `XREADGROUP` call.
+   ///
+   /// **`conn` and `read_conn` MUST be independent `MultiplexedConnection`
+   /// instances obtained from separate calls to
+   /// [`redis::Client::get_multiplexed_async_connection`]. Do NOT pass a
+   /// clone of the same handle.** A `MultiplexedConnection` pipelines all
+   /// commands over a single TCP socket, so a blocking `XREADGROUP` on a
+   /// shared handle stalls every other command queued behind it —
+   /// including the XACKs this queue sends to confirm processed messages,
+   /// which will then time out.
+   ///
+   /// ```rust,ignore
+   /// let client = redis::Client::open("redis://127.0.0.1:6379")?;
+   /// let conn      = client.get_multiplexed_async_connection().await?;
+   /// let read_conn = client.get_multiplexed_async_connection().await?;
+   /// let builder = QueueBuilder::new("q", "g", "c", worker, conn, read_conn);
+   /// ```
    pub fn new(
       name: impl Into<String>,
       consumer_group: impl Into<String>,
       consumer_id: impl Into<String>,
       worker: F,
       conn: MultiplexedConnection,
+      read_conn: MultiplexedConnection,
    ) -> Self {
       Self {
          name: name.into(),
@@ -56,6 +79,7 @@ where
          worker: Arc::new(worker),
          claimer: None,
          conn,
+         read_conn,
          _marker: PhantomData,
       }
    }
@@ -106,6 +130,7 @@ where
          worker: self.worker,
          claimer: Some(claimer),
          conn: self.conn,
+         read_conn: self.read_conn,
          _marker: PhantomData,
       }
    }
@@ -242,6 +267,7 @@ where
             None => None,
          },
          conn: builder.conn,
+         read_conn: builder.read_conn,
          _marker: builder._marker,
       }
    }
@@ -370,6 +396,10 @@ where
       let consumer_id = Arc::new(self.consumer_id);
       let worker = self.worker;
       let conn = self.conn;
+      // Dedicated connection for the blocking XREADGROUP — kept separate
+      // from `conn` so that blocking the reader does not stall XACKs and
+      // other non-blocking ops queued on the multiplexer.
+      let read_conn = self.read_conn;
 
       // ── Main consumer loop ────────────────────────────────────────────────
       let main_join = {
@@ -381,6 +411,7 @@ where
          let consumer_id = Arc::clone(&consumer_id);
          let worker = Arc::clone(&worker);
          let conn = conn.clone();
+         let mut read_conn = read_conn;
          let block_timeout = self.block_timeout;
 
          SelectedRuntime::spawn(async move {
@@ -403,8 +434,8 @@ where
                }
 
                // Step 3: XREADGROUP — read up to `available` new messages,
-               // blocking for `block_timeout` ms if none are ready
-               let mut read_conn = conn.clone();
+               // blocking for `block_timeout` ms if none are ready. Uses the
+               // dedicated `read_conn` so this block does not stall XACKs.
                let opts = StreamReadOptions::default()
                   .count(available)
                   .block(block_timeout)
@@ -416,7 +447,11 @@ where
                {
                   Ok(r) => r,
                   Err(e) => {
-                     eprintln!("failed to read from stream: {e}");
+                     // An empty stream surfaces the BLOCK timeout as an Err;
+                     // that's expected, not a real failure, so swallow it.
+                     if !e.is_timeout() {
+                        eprintln!("failed to read from stream: {e}");
+                     }
                      continue;
                   }
                };

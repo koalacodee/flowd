@@ -20,11 +20,20 @@ struct ↔ `redis::Value` mapping. Runs on either **tokio** or **smol**.
 
 ```toml
 [dependencies]
-flowd = { version = "0.1", features = ["tokio"] }
+flowd = "0.1"                   # tokio (default)
 redis = "1"
 ```
 
-Exactly one runtime feature must be enabled: `tokio` or `smol`.
+For smol:
+
+```toml
+[dependencies]
+flowd = { version = "0.1", default-features = false, features = ["smol"] }
+redis = "1"
+```
+
+Exactly one runtime feature must be enabled. `tokio` and `smol` are mutually
+exclusive; `tokio` is on by default.
 
 ## Quick start
 

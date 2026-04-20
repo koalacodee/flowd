@@ -13,6 +13,7 @@ keywords = ["redis", "queue", "streams", "task-queue", "async"]
 categories = ["asynchronous", "database"]
 
 [features]
+default = ["tokio"]
 tokio = ["dep:tokio", "redis/tokio-comp"]
 smol = ["dep:smol", "dep:futures", "dep:mea", "redis/smol-comp"]
 

@@ -25,7 +25,7 @@ mea = { version = "0.6", optional = true }
 
 # pulls in the proc-macro crate privately — `path` is used by local dev,
 # `version` is required so `cargo publish` resolves against crates.io
-flowd_derive = { path = "./flowd_derive", version = "0.1.0" }
+flowd_derive = { path = "./flowd_derive", version = "0.2.0" }
 redis = { version = "1", features = ["streams"] }
 futures-util = { version = "0.3", default-features = false, features = [
   "std",

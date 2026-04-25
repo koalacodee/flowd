@@ -110,7 +110,7 @@ impl Runtime for SmolRuntime {
    type JoinHandle = smol::Task<()>;
    type Permit = mea::semaphore::OwnedSemaphorePermit;
    type Semaphore = mea::semaphore::Semaphore;
-   type TaskSet = futures::stream::FuturesUnordered<smol::Task<()>>;
+   type TaskSet = futures_util::stream::FuturesUnordered<smol::Task<()>>;
 
    fn spawn<F: Future<Output = ()> + Send + 'static>(fut: F) -> Self::JoinHandle {
       smol::spawn(fut)
@@ -124,7 +124,9 @@ impl Runtime for SmolRuntime {
    }
 
    fn sleep(duration: Duration) -> impl Future<Output = ()> + Send {
-      async move { let _ = smol::Timer::after(duration).await; }
+      async move {
+         let _ = smol::Timer::after(duration).await;
+      }
    }
 
    fn new_semaphore(permits: usize) -> Arc<Self::Semaphore> {
@@ -148,17 +150,17 @@ impl Runtime for SmolRuntime {
    }
 
    fn new_task_set() -> Self::TaskSet {
-      futures::stream::FuturesUnordered::new()
+      futures_util::stream::FuturesUnordered::new()
    }
 
    fn spawn_task<F: Future<Output = ()> + Send + 'static>(set: &mut Self::TaskSet, fut: F) {
-      use futures::stream::FuturesUnordered;
+      use futures_util::stream::FuturesUnordered;
       // Spawn on the smol executor then push the handle into the set
       FuturesUnordered::push(set, smol::spawn(fut));
    }
 
    fn drain_task_set(set: &mut Self::TaskSet) -> impl Future<Output = ()> + Send + '_ {
-      use futures::StreamExt;
+      use futures_util::StreamExt;
       async {
          // Drive all remaining tasks to completion
          while set.next().await.is_some() {}

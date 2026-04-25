@@ -62,9 +62,12 @@
 //! handle.shutdown().await;
 //! ```
 
+mod group;
 mod helpers;
 mod queue;
 mod types;
 
 pub use queue::{NoDlqError, NoDlqFn, NoDlqFut};
-pub use types::{Claimer, ClaimerBuilder, Queue, QueueBuilder, QueueHandle, Task};
+pub use types::{
+   Claimer, ClaimerBuilder, Queue, QueueBuilder, QueueGroup, QueueGroupHandle, QueueHandle, Task,
+};

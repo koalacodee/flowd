@@ -15,18 +15,22 @@ categories = ["asynchronous", "database"]
 [features]
 default = ["tokio"]
 tokio = ["dep:tokio", "redis/tokio-comp"]
-smol = ["dep:smol", "dep:futures", "dep:mea", "redis/smol-comp"]
+smol = ["dep:smol", "dep:mea", "redis/smol-comp"]
 
 [dependencies]
 anyhow = "1.0.102"
 tokio = { version = "1", optional = true, features = ["rt", "macros", "sync"] }
 smol = { version = "2", optional = true }
 mea = { version = "0.6", optional = true }
-futures = { version = "0.3", optional = true }
+
 # pulls in the proc-macro crate privately — `path` is used by local dev,
 # `version` is required so `cargo publish` resolves against crates.io
 flowd_derive = { path = "./flowd_derive", version = "0.1.0" }
 redis = { version = "1", features = ["streams"] }
+futures-util = { version = "0.3", default-features = false, features = [
+  "std",
+  "alloc",
+] }
 
 [package.metadata.docs.rs]
 features = ["tokio"]

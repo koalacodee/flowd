@@ -1,10 +1,9 @@
+mod types;
 use crate::{
    Job,
-   task::{
-      Queue, QueueHandle,
-      types::{QueueGroup, QueueGroupHandle},
-   },
+   task::{Queue, QueueHandle},
 };
+pub use types::{QueueGroup, QueueGroupHandle};
 
 impl QueueGroupHandle {
    /// Signal every queue in the group to stop accepting new messages and
@@ -79,7 +78,7 @@ impl QueueGroup {
    /// type-erase manually.
    ///
    /// ```rust,ignore
-   /// let mut group = QueueGroup::from_queues(vec![]);
+   /// let mut group = QueueGroup::default();
    /// group.push(email_queue);     // Queue<Email, ...>
    /// group.push(payment_queue);   // Queue<Payment, ...> — different generics, fine
    /// let handle = group.run_all();

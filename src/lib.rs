@@ -79,20 +79,20 @@ pub use redis;
 
 /// Pretty-print every field of a `Job` value.
 pub fn debug_map<T: Job + std::fmt::Debug>(value: T) -> Result<(), Error> {
-    // Serialize the struct into its Redis-ready pairs
-    let pairs = value.try_to_pairs().map_err(|e| anyhow::anyhow!(e))?;
-    // Print each field name right-aligned with its debug representation
-    for (k, v) in &pairs {
-        println!("{:>20} : {:?}", k, v);
-    }
-    Ok(())
+   // Serialize the struct into its Redis-ready pairs
+   let pairs = value.try_to_pairs().map_err(|e| anyhow::anyhow!(e))?;
+   // Print each field name right-aligned with its debug representation
+   for (k, v) in &pairs {
+      println!("{:>20} : {:?}", k, v);
+   }
+   Ok(())
 }
 
 /// Round-trip a value through pairs — useful for testing your mapper.
 pub fn round_trip<T: Job>(value: T) -> Result<T, Error> {
-    // Serialize to pairs, then immediately deserialize back
-    let pairs = value.try_to_pairs().map_err(|e| anyhow::anyhow!(e))?;
-    T::try_from_pairs(&pairs).map_err(|e| anyhow::anyhow!(e))
+   // Serialize to pairs, then immediately deserialize back
+   let pairs = value.try_to_pairs().map_err(|e| anyhow::anyhow!(e))?;
+   T::try_from_pairs(&pairs).map_err(|e| anyhow::anyhow!(e))
 }
 
 // ── Prelude ───────────────────────────────────────────────────────────────────
@@ -103,5 +103,5 @@ pub fn round_trip<T: Job>(value: T) -> Result<T, Error> {
 /// use flowd::prelude::*;
 /// ```
 pub mod prelude {
-    pub use super::{Job, debug_map, round_trip};
+   pub use super::{Job, debug_map, round_trip};
 }

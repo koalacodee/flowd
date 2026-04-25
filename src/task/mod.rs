@@ -28,32 +28,32 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use flowd::task::*;
-//! use std::sync::Arc;
+//! use flowd::prelude::*;
+//! use flowd::task::{ClaimerBuilder, Queue, QueueBuilder};
 //!
-//! let queue = Queue::new(QueueBuilder {
-//!     name: "emails".into(),
-//!     consumer_group: "senders".into(),
-//!     consumer_id: "sender-1".into(),
-//!     block_timeout: 5000,
-//!     max_concurrent_tasks: 20,
-//!     worker: Arc::new(|email: &Email| async move {
-//!         send_email(email).await
-//!     }),
-//!     claimer: Some(Claimer {
-//!         min_idle_time: 30_000,
-//!         block_timeout: 10_000,
-//!         max_concurrent_tasks: 5,
-//!         max_retries: 3,
-//!         dlq_worker: Some(Arc::new(|email: &Email, attempts: usize| async move {
-//!             log::error!("dead-lettered after {attempts} attempts: {:?}", email);
-//!             Ok::<(), String>(())
-//!         })),
-//!         _marker: Default::default(),
-//!     }),
-//!     conn,
-//!     _marker: Default::default(),
-//! });
+//! let client    = redis::Client::open("redis://127.0.0.1:6379")?;
+//! let conn      = client.get_multiplexed_async_connection().await?;
+//! let read_conn = client.get_multiplexed_async_connection().await?;
+//!
+//! let claimer = ClaimerBuilder::<Email, _, _, _>::new()
+//!     .min_idle_time(30_000)
+//!     .max_retries(3)
+//!     .dlq_worker(|email: Email, attempts: usize| async move {
+//!         log::error!("dead-lettered after {attempts} attempts: {:?}", email);
+//!         Ok::<(), String>(())
+//!     });
+//!
+//! let queue = Queue::new(
+//!     QueueBuilder::new(
+//!         "emails", "senders", "sender-1",
+//!         |email: Email| async move { send_email(email).await },
+//!         conn,
+//!         read_conn,
+//!     )
+//!     .block_timeout(5000)
+//!     .max_concurrent_tasks(20)
+//!     .claimer(claimer),
+//! );
 //!
 //! queue.init(None).await?;
 //! let handle = queue.run();
@@ -62,12 +62,13 @@
 //! handle.shutdown().await;
 //! ```
 
+mod claimer;
 mod group;
 mod helpers;
 mod queue;
 mod types;
 
-pub use queue::{NoDlqError, NoDlqFn, NoDlqFut};
-pub use types::{
-   Claimer, ClaimerBuilder, Queue, QueueBuilder, QueueGroup, QueueGroupHandle, QueueHandle, Task,
-};
+pub use claimer::{Claimer, ClaimerBuilder};
+pub use group::{QueueGroup, QueueGroupHandle};
+pub use queue::{NoDlqError, NoDlqFn, NoDlqFut, Queue, QueueBuilder, QueueHandle};
+pub use types::Task;

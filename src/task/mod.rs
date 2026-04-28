@@ -55,7 +55,7 @@
 //!     .claimer(claimer),
 //! );
 //!
-//! queue.init(None).await?;
+//! queue.init().await?;
 //! let handle = queue.run();
 //!
 //! // On SIGTERM:

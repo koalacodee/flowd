@@ -5,9 +5,9 @@ use std::sync::Arc;
 /// Configuration for the claimer worker that reclaims stuck messages from
 /// the pending entry list (PEL) via `XAUTOCLAIM`.
 ///
-/// Messages whose delivery count exceeds [`max_retries`](Self::max_retries)
-/// are routed to the optional [`dlq_worker`](Self::dlq_worker) callback and
-/// then acknowledged to remove them from the PEL.
+/// Messages whose delivery count exceeds `max_retries` are routed to the
+/// optional `dlq_worker` callback and then acknowledged to remove them from
+/// the PEL. Both are configured via [`ClaimerBuilder`].
 pub struct Claimer<I: Job, DE, DF, DFut>
 where
    DF: Fn(I, usize) -> DFut,

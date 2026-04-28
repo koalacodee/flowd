@@ -46,7 +46,7 @@
 //!     .max_concurrent_tasks(10),
 //! );
 //!
-//! queue.init(None).await?;
+//! queue.init().await?;
 //! let handle = queue.run();
 //! // ... later ...
 //! handle.shutdown().await;

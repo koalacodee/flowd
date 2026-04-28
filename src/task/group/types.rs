@@ -1,7 +1,8 @@
 use super::RunnableQueue;
 use crate::task::QueueHandle;
 
-/// A bundle of heterogeneous [`Queue`]s started and shut down as a unit.
+/// A bundle of heterogeneous [`Queue`](crate::task::Queue)s started and shut
+/// down as a unit.
 ///
 /// Unlike a single `Queue<...>`, the group can hold queues with different
 /// payload, worker, and DLQ types. Type erasure is handled internally so

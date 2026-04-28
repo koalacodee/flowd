@@ -1,6 +1,6 @@
 [package]
 name = "flowd"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Redis Streams-backed task queue with a derive macro for automatic struct ↔ redis::Value mapping. Supports tokio and smol."
@@ -25,7 +25,7 @@ mea = { version = "0.6", optional = true }
 
 # pulls in the proc-macro crate privately — `path` is used by local dev,
 # `version` is required so `cargo publish` resolves against crates.io
-flowd_derive = { path = "./flowd_derive", version = "0.2.0" }
+flowd_derive = { path = "./flowd_derive", version = "0.3.0" }
 redis = { version = "1", features = ["streams"] }
 futures-util = { version = "0.3", default-features = false, features = [
   "std",

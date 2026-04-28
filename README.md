@@ -13,6 +13,9 @@ struct ↔ `redis::Value` mapping. Runs on either **tokio** or **smol**.
   delivery counts via `XPENDING`, and routes exhausted messages to a
   dead-letter callback.
 - Batch enqueue via Redis pipelining (`enqueue_bulk`).
+- `QueueGroup` for managing heterogeneous queues (different payload, worker,
+  and DLQ types) from one handle, with pipelined `init_all` and fan-out
+  shutdown.
 - `#[derive(Job)]` generates all the glue between your struct and Redis Stream
   fields — no manual serialization.
 
@@ -20,7 +23,7 @@ struct ↔ `redis::Value` mapping. Runs on either **tokio** or **smol**.
 
 ```toml
 [dependencies]
-flowd = "0.1"                   # tokio (default)
+flowd = "0.3"                   # tokio (default)
 redis = "1"
 ```
 
@@ -28,7 +31,7 @@ For smol:
 
 ```toml
 [dependencies]
-flowd = { version = "0.1", default-features = false, features = ["smol"] }
+flowd = { version = "0.3", default-features = false, features = ["smol"] }
 redis = "1"
 ```
 
@@ -67,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
         .max_concurrent_tasks(10),
     );
 
-    queue.init(None).await?;
+    queue.init().await?;
     let handle = queue.run();
 
     // On SIGTERM:
@@ -132,6 +135,45 @@ let queue = Queue::new(
     QueueBuilder::new("emails", "senders", "sender-1", worker, conn, read_conn)
         .claimer(claimer),
 );
+```
+
+## Heterogeneous queues with `QueueGroup`
+
+`Queue<...>` is generic over its payload, worker, and DLQ types, so a
+`Vec<Queue<...>>` can only hold one shape. `QueueGroup` solves this by
+type-erasing each queue behind a sealed `RunnableQueue` trait — push concrete
+`Queue<...>` values directly, never `Box<dyn ...>`:
+
+```rust,ignore
+use flowd::task::QueueGroup;
+
+let mut group = QueueGroup::default();
+group.push(email_queue);     // Queue<Email, ...>
+group.push(payment_queue);   // Queue<Payment, ...> — different generics, fine
+group.push(report_queue);    // Queue<Report, ...>
+
+// Single Redis pipeline (one round-trip) creates every consumer group.
+// BUSYGROUP (already-exists) is silently ignored per-command.
+group.init_all().await?;
+
+// Start every queue and get a single handle for coordinated shutdown.
+let handle = group.run_all();
+// On SIGTERM:
+handle.shutdown().await;     // fans out to every queue concurrently
+```
+
+`QueueGroup::init_all` reuses a clone of the first queue's connection, so
+all queues in a group should target the same Redis instance.
+
+## Per-queue starting ID
+
+By default, `Queue::init` creates the consumer group at `"0"` (read from the
+beginning of the stream). To start from new messages only, or any specific
+ID, set it on the builder:
+
+```rust,ignore
+QueueBuilder::new("emails", "senders", "sender-1", worker, conn, read_conn)
+    .starting_id("$")        // only see messages added after group creation
 ```
 
 ## The `Job` derive

@@ -67,6 +67,7 @@ where
          conn,
          read_conn,
          _marker: PhantomData,
+         starting_id: None,
       }
    }
 }
@@ -118,7 +119,18 @@ where
          conn: self.conn,
          read_conn: self.read_conn,
          _marker: PhantomData,
+         starting_id: self.starting_id,
       }
+   }
+
+   /// Set the stream message ID at which the consumer group begins
+   /// reading. Pass `"0"` (or leave unset) to start from the beginning,
+   /// or `"$"` to only see messages added after group creation.
+   ///
+   /// Used as the `id` argument to `XGROUP CREATE` inside [`Queue::init`].
+   pub fn starting_id(mut self, starting_id: impl Into<String>) -> Self {
+      self.starting_id = Some(starting_id.into());
+      self
    }
 }
 

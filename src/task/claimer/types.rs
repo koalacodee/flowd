@@ -29,7 +29,7 @@ where
    /// for messages that exceed `max_retries`. If `None`, exhausted messages
    /// are silently acknowledged.
    pub(super) dlq_worker: Option<Arc<DF>>,
-   pub(super) _marker: PhantomData<(I, DE, DFut)>,
+   pub(super) _marker: PhantomData<fn() -> (I, DE, DFut)>,
 }
 
 /// Builder for constructing a [`Claimer`].
@@ -55,5 +55,5 @@ where
    pub(super) max_concurrent_tasks: usize,
    pub(super) max_retries: usize,
    pub(super) dlq_worker: Option<Arc<DF>>,
-   pub(super) _marker: PhantomData<(I, DE, DFut)>,
+   pub(super) _marker: PhantomData<fn() -> (I, DE, DFut)>,
 }

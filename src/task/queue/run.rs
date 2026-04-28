@@ -38,7 +38,33 @@ where
          conn: builder.conn,
          read_conn: builder.read_conn,
          _marker: builder._marker,
+         starting_id: builder.starting_id,
       }
+   }
+
+   // ── Cross-submodule accessors ───────────────────────────────────────────
+   //
+   // `pub(crate)` getters that let other submodules in the crate read
+   // these fields without widening the field visibility past `pub(super)`.
+
+   /// Stream key.
+   pub(crate) fn name(&self) -> &str {
+      &self.name
+   }
+
+   /// Consumer group name.
+   pub(crate) fn consumer_group(&self) -> &str {
+      &self.consumer_group
+   }
+
+   /// Configured starting ID, if any.
+   pub(crate) fn starting_id(&self) -> Option<&str> {
+      self.starting_id.as_deref()
+   }
+
+   /// Clone of the shared (non-blocking) connection.
+   pub(crate) fn conn(&self) -> redis::aio::MultiplexedConnection {
+      self.conn.clone()
    }
 
    /// Create the consumer group on the stream (via `XGROUP CREATE`).
@@ -46,18 +72,18 @@ where
    /// Safe to call multiple times — silently ignores the `BUSYGROUP` error
    /// if the group already exists.
    ///
-   /// `starting_id` controls where the group begins reading. Pass `None`
-   /// to start from the beginning (`"0"`), or `Some("$".into())` to only
-   /// see new messages.
-   pub async fn init(&self, starting_id: Option<String>) -> Result<(), Error> {
-      let mut conn = self.conn.clone();
+   /// Where the group begins reading is controlled by the `starting_id`
+   /// field on the queue (see [`QueueBuilder::starting_id`]). When unset,
+   /// it defaults to `"0"` (read from the beginning).
+   pub async fn init(&self) -> Result<(), Error> {
+      let mut conn = self.conn();
 
       // Create the consumer group (and the stream itself if it doesn't exist)
       let _: () = match conn
          .xgroup_create_mkstream(
-            &self.name,
-            &self.consumer_group,
-            starting_id.unwrap_or("0".to_string()),
+            self.name(),
+            self.consumer_group(),
+            self.starting_id().unwrap_or("0"),
          )
          .await
       {

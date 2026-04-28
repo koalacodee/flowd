@@ -1,8 +1,13 @@
 mod types;
+
 use crate::{
    Job,
    task::{Queue, QueueHandle},
 };
+use anyhow::Error;
+use redis::RedisResult;
+use redis::aio::MultiplexedConnection;
+
 pub use types::{QueueGroup, QueueGroupHandle};
 
 impl QueueGroupHandle {
@@ -41,6 +46,21 @@ pub trait RunnableQueue: sealed::Sealed {
    /// Consume the boxed queue and start its consumer (and optional claimer)
    /// loops. Equivalent to calling [`Queue::run`] on the underlying queue.
    fn run(self: Box<Self>) -> QueueHandle;
+
+   /// Stream key (the `name` passed to [`QueueBuilder::new`]).
+   fn name(&self) -> &str;
+
+   /// Consumer group name.
+   fn consumer_group(&self) -> &str;
+
+   /// Configured starting ID for the consumer group, or `None` if none was
+   /// set (in which case [`QueueGroup::init_all`] defaults to `"0"`).
+   fn starting_id(&self) -> Option<&str>;
+
+   /// Clone of the queue's shared (non-blocking) connection. Used by
+   /// [`QueueGroup::init_all`] to send a pipelined `XGROUP CREATE` for
+   /// every queue in the group from a single round-trip.
+   fn conn(&self) -> MultiplexedConnection;
 }
 
 impl<I, E, F, Fut, DE, DF, DFut> sealed::Sealed for Queue<I, E, F, Fut, DE, DF, DFut>
@@ -67,6 +87,22 @@ where
 {
    fn run(self: Box<Self>) -> QueueHandle {
       Queue::run(*self)
+   }
+
+   fn name(&self) -> &str {
+      Queue::name(self)
+   }
+
+   fn consumer_group(&self) -> &str {
+      Queue::consumer_group(self)
+   }
+
+   fn starting_id(&self) -> Option<&str> {
+      Queue::starting_id(self)
+   }
+
+   fn conn(&self) -> MultiplexedConnection {
+      Queue::conn(self)
    }
 }
 
@@ -97,5 +133,41 @@ impl QueueGroup {
       QueueGroupHandle {
          handles: self.queues.into_iter().map(RunnableQueue::run).collect(),
       }
+   }
+
+   /// Initialize the consumer group for every queue in the bundle.
+   ///
+   /// Sends `XGROUP CREATE MKSTREAM` for every queue in a single Redis
+   /// pipeline (one round-trip), using a clone of the first queue's
+   /// shared connection. Per-command results are inspected individually:
+   /// `BUSYGROUP` (group already exists) is ignored; any other error is
+   /// returned as the function's `Err`.
+   ///
+   /// Returns `Ok(())` on an empty group.
+   pub async fn init_all(&self) -> Result<(), Error> {
+      let Some(first) = self.queues.first() else {
+         return Ok(());
+      };
+      let mut conn = first.conn();
+
+      let mut pipe = redis::pipe();
+      for queue in self.queues.iter() {
+         pipe.xgroup_create_mkstream(
+            queue.name(),
+            queue.consumer_group(),
+            queue.starting_id().unwrap_or("0"),
+         );
+      }
+
+      let results: Vec<RedisResult<()>> = pipe.query_async(&mut conn).await?;
+      for r in results {
+         match r {
+            Ok(_) => {}
+            Err(e) if e.code() == Some("BUSYGROUP") => {}
+            Err(e) => return Err(anyhow::anyhow!(e)),
+         }
+      }
+
+      Ok(())
    }
 }
